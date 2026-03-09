@@ -16,6 +16,9 @@ cd backend
 # Activate the virtual environment
 source venv/bin/activate
 
+# Install the backend dependencies
+pip install -r requirements.txt
+
 # Start the development server
 fastapi dev src/main.py
 ```
