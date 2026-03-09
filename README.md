@@ -17,7 +17,7 @@ cd backend
 source venv/bin/activate
 
 # Start the development server
-uvicorn src.main:app --reload
+fastapi dev src/main.py
 ```
 
 The backend API will be available at `http://localhost:8000`. You can view the API documentation at `http://localhost:8000/docs`.
