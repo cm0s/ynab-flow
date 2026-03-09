@@ -33,3 +33,63 @@ class Account(Base):
     currency = Column(String, nullable=True)
 
     plan = relationship("Plan", back_populates="accounts")
+    transactions = relationship("Transaction", back_populates="account")
+
+class CategoryGroup(Base):
+    __tablename__ = 'category_groups'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    plan_id = Column(String, ForeignKey('plans.id'), nullable=False)
+    ynab_category_group_id = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    deleted = Column(Boolean, default=False)
+
+    plan = relationship("Plan")
+    categories = relationship("Category", back_populates="category_group")
+
+class Category(Base):
+    __tablename__ = 'categories'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    category_group_id = Column(String, ForeignKey('category_groups.id'), nullable=False)
+    ynab_category_id = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    deleted = Column(Boolean, default=False)
+
+    category_group = relationship("CategoryGroup", back_populates="categories")
+    transactions = relationship("Transaction", back_populates="category")
+
+class Payee(Base):
+    __tablename__ = 'payees'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    plan_id = Column(String, ForeignKey('plans.id'), nullable=False)
+    ynab_payee_id = Column(String, unique=True, index=True, nullable=False)
+    name = Column(String, nullable=False)
+    deleted = Column(Boolean, default=False)
+
+    plan = relationship("Plan")
+    transactions = relationship("Transaction", back_populates="payee")
+
+class Transaction(Base):
+    __tablename__ = 'transactions'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    plan_id = Column(String, ForeignKey('plans.id'), nullable=False)
+    account_id = Column(String, ForeignKey('accounts.id'), nullable=False)
+    payee_id = Column(String, ForeignKey('payees.id'), nullable=True)
+    category_id = Column(String, ForeignKey('categories.id'), nullable=True)
+    ynab_transaction_id = Column(String, unique=True, index=True, nullable=False)
+    
+    date = Column(String, nullable=False)  # Stored as YYYY-MM-DD
+    amount = Column(Float, nullable=False) # Milliunits in YNAB, or standard float depending on your adapter
+    memo = Column(String, nullable=True)
+    cleared = Column(String, nullable=False, default="uncleared")
+    approved = Column(Boolean, default=False)
+    deleted = Column(Boolean, default=False)
+
+    plan = relationship("Plan")
+    account = relationship("Account", back_populates="transactions")
+    payee = relationship("Payee", back_populates="transactions")
+    category = relationship("Category", back_populates="transactions")
+
