@@ -1,5 +1,8 @@
 import os
+from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
+
+load_dotenv()
 from sqlalchemy.orm import Session
 from src.database import get_db
 from src.ynab_client import YnabClient, YNABAPIError
