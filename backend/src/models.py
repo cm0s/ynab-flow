@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, Float, DateTime, ForeignKey
+from sqlalchemy import Column, String, Boolean, Float, Integer, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -93,3 +93,28 @@ class Transaction(Base):
     payee = relationship("Payee", back_populates="transactions")
     category = relationship("Category", back_populates="transactions")
 
+
+class Rule(Base):
+    __tablename__ = 'rules'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    plan_id = Column(String, ForeignKey('plans.id'), nullable=False)
+    name = Column(String, nullable=False)
+    priority = Column(Integer, nullable=False, default=0)  # Higher wins
+
+    # Conditions (FR-4.1)
+    match_type = Column(String, nullable=False, default="contains")  # exact | contains | regex
+    pattern = Column(String, nullable=False)
+    amount_sign = Column(String, nullable=True)   # "positive" | "negative" | None (any)
+    amount_min = Column(Float, nullable=True)
+    amount_max = Column(Float, nullable=True)
+    account_filter = Column(String, nullable=True)    # Account name substring
+    category_filter = Column(String, nullable=True)   # Source category name substring
+
+    # Outputs (FR-4.2)
+    assign_payee = Column(String, nullable=True)
+    assign_category = Column(String, nullable=True)
+    flag_review = Column(Boolean, default=False)
+    flag_ignore = Column(Boolean, default=False)
+
+    plan = relationship("Plan")

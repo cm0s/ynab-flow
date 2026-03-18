@@ -1,13 +1,17 @@
 import os
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
+from pydantic import BaseModel
+from typing import Optional, List
 
 load_dotenv()
 from sqlalchemy.orm import Session
 from src.database import get_db
 from src.ynab_client import YnabClient, YNABAPIError
 from src.sync_service import SyncService
-from src.models import Plan
+from src.normalizer import normalize
+from src.rule_engine import RuleEngine
+from src.models import Plan, Rule
 
 app = FastAPI(title="YNAB Flow API")
 
@@ -51,3 +55,111 @@ def sync_plan_data(
         return {"status": "success", "message": f"Successfully synced data for plan: {plan.name}"}
     except YNABAPIError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas for Phase 3
+# ---------------------------------------------------------------------------
+
+class NormalizeRequest(BaseModel):
+    memo: str
+
+class ClassifyRequest(BaseModel):
+    plan_id: str
+    memo: str
+    amount: float = 0.0
+    account_name: str = ""
+    category_name: str = ""
+
+class RuleCreate(BaseModel):
+    plan_id: str
+    name: str
+    priority: int = 0
+    match_type: str = "contains"  # exact | contains | regex
+    pattern: str
+    amount_sign: Optional[str] = None
+    amount_min: Optional[float] = None
+    amount_max: Optional[float] = None
+    account_filter: Optional[str] = None
+    category_filter: Optional[str] = None
+    assign_payee: Optional[str] = None
+    assign_category: Optional[str] = None
+    flag_review: bool = False
+    flag_ignore: bool = False
+
+# ---------------------------------------------------------------------------
+# Phase 3 endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/normalize")
+def normalize_memo(req: NormalizeRequest):
+    """Normalize a raw bank memo (FR-3)."""
+    result = normalize(req.memo)
+    return {
+        "original_memo": result.original_memo,
+        "cleaned_memo": result.cleaned_memo,
+        "merchant_stem": result.merchant_stem,
+    }
+
+@app.post("/classify")
+def classify_transaction(req: ClassifyRequest, db: Session = Depends(get_db)):
+    """Normalize a memo and run it through the rule engine (FR-3 + FR-4)."""
+    norm = normalize(req.memo)
+    engine = RuleEngine(db, req.plan_id)
+    match = engine.evaluate(
+        normalized_memo=norm.cleaned_memo,
+        amount=req.amount,
+        account_name=req.account_name,
+        category_name=req.category_name,
+    )
+    return {
+        "original_memo": norm.original_memo,
+        "cleaned_memo": norm.cleaned_memo,
+        "merchant_stem": norm.merchant_stem,
+        "matched_rule": match.rule_name if match else None,
+        "assign_payee": match.assign_payee if match else None,
+        "assign_category": match.assign_category if match else None,
+        "flag_review": match.flag_review if match else False,
+        "flag_ignore": match.flag_ignore if match else False,
+    }
+
+@app.get("/rules")
+def list_rules(plan_id: str, db: Session = Depends(get_db)):
+    """List all rules for a plan, ordered by priority."""
+    rules = (
+        db.query(Rule)
+        .filter(Rule.plan_id == plan_id)
+        .order_by(Rule.priority.desc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id, "name": r.name, "priority": r.priority,
+            "match_type": r.match_type, "pattern": r.pattern,
+            "assign_payee": r.assign_payee, "assign_category": r.assign_category,
+            "flag_review": r.flag_review, "flag_ignore": r.flag_ignore,
+        }
+        for r in rules
+    ]
+
+@app.post("/rules")
+def create_rule(req: RuleCreate, db: Session = Depends(get_db)):
+    """Create a new deterministic rule."""
+    rule = Rule(
+        plan_id=req.plan_id,
+        name=req.name,
+        priority=req.priority,
+        match_type=req.match_type,
+        pattern=req.pattern,
+        amount_sign=req.amount_sign,
+        amount_min=req.amount_min,
+        amount_max=req.amount_max,
+        account_filter=req.account_filter,
+        category_filter=req.category_filter,
+        assign_payee=req.assign_payee,
+        assign_category=req.assign_category,
+        flag_review=req.flag_review,
+        flag_ignore=req.flag_ignore,
+    )
+    db.add(rule)
+    db.commit()
+    return {"status": "success", "rule_id": rule.id, "name": rule.name}
