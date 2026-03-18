@@ -1,6 +1,7 @@
 import os
+from dataclasses import asdict
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -13,7 +14,8 @@ from src.normalizer import normalize
 from src.rule_engine import RuleEngine
 from src.orchestrator import Orchestrator
 from src.ml_classifier import MLClassifier
-from src.models import Plan, Rule
+from src.csv_service import parse_csv, bulk_predict
+from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule
 
 app = FastAPI(title="YNAB Flow API")
 
@@ -216,3 +218,95 @@ def train_models(plan_id: str, db: Session = Depends(get_db)):
     classifier = MLClassifier()
     stats = classifier.train(db, plan_id)
     return {"status": "success", **stats}
+
+# ---------------------------------------------------------------------------
+# Phase 5 endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/upload-csv")
+async def upload_csv(
+    plan_id: str = Query(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Upload a bank CSV and get bulk predictions."""
+    plan = db.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+
+    content = (await file.read()).decode("utf-8-sig")
+    transactions = parse_csv(content)
+    results = bulk_predict(db, plan_id, transactions)
+    return {"count": len(results), "predictions": [asdict(r) for r in results]}
+
+
+@app.put("/rules/{rule_id}")
+def update_rule(rule_id: str, req: RuleCreate, db: Session = Depends(get_db)):
+    """Update an existing rule."""
+    rule = db.query(Rule).filter(Rule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found.")
+    for field in [
+        "name", "priority", "match_type", "pattern", "amount_sign",
+        "amount_min", "amount_max", "account_filter", "category_filter",
+        "assign_payee", "assign_category", "flag_review", "flag_ignore",
+    ]:
+        setattr(rule, field, getattr(req, field))
+    db.commit()
+    return {"status": "success", "rule_id": rule.id}
+
+
+@app.delete("/rules/{rule_id}")
+def delete_rule(rule_id: str, db: Session = Depends(get_db)):
+    """Delete a rule."""
+    rule = db.query(Rule).filter(Rule.id == rule_id).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found.")
+    db.delete(rule)
+    db.commit()
+    return {"status": "success"}
+
+
+@app.get("/plans")
+def list_plans(db: Session = Depends(get_db)):
+    """List all synced plans."""
+    plans = db.query(Plan).all()
+    return [
+        {"id": p.id, "name": p.name, "ynab_plan_id": p.ynab_plan_id}
+        for p in plans
+    ]
+
+
+@app.get("/plans/{plan_id}/accounts")
+def list_accounts(plan_id: str, db: Session = Depends(get_db)):
+    """List accounts for a plan."""
+    accounts = db.query(Account).filter(Account.plan_id == plan_id).all()
+    return [
+        {"id": a.id, "name": a.name, "type": a.type, "closed": a.closed}
+        for a in accounts
+    ]
+
+
+@app.get("/plans/{plan_id}/categories")
+def list_categories(plan_id: str, db: Session = Depends(get_db)):
+    """List category groups and categories for a plan."""
+    groups = db.query(CategoryGroup).filter(CategoryGroup.plan_id == plan_id).all()
+    return [
+        {
+            "id": g.id, "name": g.name,
+            "categories": [
+                {"id": c.id, "name": c.name}
+                for c in g.categories if not c.deleted
+            ],
+        }
+        for g in groups if not g.deleted
+    ]
+
+
+@app.get("/plans/{plan_id}/payees")
+def list_payees(plan_id: str, db: Session = Depends(get_db)):
+    """List payees for a plan."""
+    payees = db.query(Payee).filter(
+        Payee.plan_id == plan_id, Payee.deleted == False
+    ).all()
+    return [{"id": p.id, "name": p.name} for p in payees]
