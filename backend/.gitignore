@@ -64,6 +64,9 @@ venv.bak/
 *.db
 *.sqlite3
 
+# Trained ML models
+models/
+
 # OS generated files
 .DS_Store
 .DS_Store?

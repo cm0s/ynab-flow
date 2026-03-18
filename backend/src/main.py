@@ -11,6 +11,8 @@ from src.ynab_client import YnabClient, YNABAPIError
 from src.sync_service import SyncService
 from src.normalizer import normalize
 from src.rule_engine import RuleEngine
+from src.orchestrator import Orchestrator
+from src.ml_classifier import MLClassifier
 from src.models import Plan, Rule
 
 app = FastAPI(title="YNAB Flow API")
@@ -163,3 +165,54 @@ def create_rule(req: RuleCreate, db: Session = Depends(get_db)):
     db.add(rule)
     db.commit()
     return {"status": "success", "rule_id": rule.id, "name": rule.name}
+
+# ---------------------------------------------------------------------------
+# Phase 4 endpoints
+# ---------------------------------------------------------------------------
+
+class PredictRequest(BaseModel):
+    plan_id: str
+    memo: str
+    amount: float = 0.0
+    account_name: str = ""
+    account_id: str = ""
+    category_name: str = ""
+
+@app.post("/predict")
+def predict_transaction(req: PredictRequest, db: Session = Depends(get_db)):
+    """Full prediction orchestration (FR-7)."""
+    plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+
+    orch = Orchestrator(db, req.plan_id)
+    result = orch.predict(
+        memo=req.memo,
+        amount=req.amount,
+        account_name=req.account_name,
+        account_id=req.account_id,
+        category_name=req.category_name,
+    )
+    return {
+        "original_memo": result.original_memo,
+        "cleaned_memo": result.cleaned_memo,
+        "merchant_stem": result.merchant_stem,
+        "payee": result.payee,
+        "category": result.category,
+        "confidence": result.confidence,
+        "source": result.source,
+        "explanation": result.explanation,
+        "review_required": result.review_required,
+        "flag_ignore": result.flag_ignore,
+    }
+
+@app.post("/train")
+def train_models(plan_id: str, db: Session = Depends(get_db)):
+    """Train ML models from historical YNAB transactions (FR-6.4)."""
+    plan = db.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+
+    classifier = MLClassifier()
+    stats = classifier.train(db, plan_id)
+    return {"status": "success", **stats}
