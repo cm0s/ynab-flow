@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 import { useQuery, useMutation, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
-  CheckCircle, AlertCircle, XCircle, Settings,
+  CheckCircle, AlertCircle, XCircle, Settings, BarChart3,
 } from 'lucide-react';
 import { fetchPlans, uploadCSV, syncBudgets, fetchAccounts, writeBack, createRule } from './api/client';
 import type { Plan, PredictionRow, Account, WriteBackResponse } from './api/client';
@@ -10,10 +10,11 @@ import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
 import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
 import SettingsPage from './components/SettingsPage';
+import MetricsDashboard from './components/MetricsDashboard';
 
 const queryClient = new QueryClient();
 
-type View = 'import' | 'review' | 'push' | 'settings';
+type View = 'import' | 'review' | 'push' | 'settings' | 'dashboard';
 
 function AppContent() {
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
@@ -146,6 +147,7 @@ function AppContent() {
     if (view === 'push') { setView('review'); setWriteResult(null); }
     else if (view === 'review') setView('import');
     else if (view === 'settings') setView('import');
+    else if (view === 'dashboard') setView('import');
   };
 
   return (
@@ -196,6 +198,13 @@ function AppContent() {
               <RefreshCw size={16} />
             )}
             Sync
+          </button>
+          <button
+            className={`btn ${view === 'dashboard' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setView(view === 'dashboard' ? 'import' : 'dashboard')}
+            title="Dashboard"
+          >
+            <BarChart3 size={18} />
           </button>
           <button
             className={`btn ${view === 'settings' ? 'btn-primary' : 'btn-ghost'}`}
@@ -409,6 +418,11 @@ function AppContent() {
         {/* SETTINGS */}
         {view === 'settings' && (
           <SettingsPage planId={selectedPlanId} />
+        )}
+
+        {/* DASHBOARD */}
+        {view === 'dashboard' && (
+          <MetricsDashboard planId={selectedPlanId} />
         )}
       </main>
     </div>

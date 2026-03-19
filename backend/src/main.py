@@ -16,7 +16,8 @@ from src.orchestrator import Orchestrator
 from src.ml_classifier import MLClassifier
 from src.csv_service import parse_csv, bulk_predict
 from src.write_back_service import WriteBackService, WriteTransaction
-from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule
+from src.transfer_detector import detect_transfer
+from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction
 
 app = FastAPI(title="YNAB Flow API")
 
@@ -379,4 +380,108 @@ def write_back(req: WriteBackRequest, db: Session = Depends(get_db)):
             for r in result.results
         ],
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 10 endpoints — Transfer Detection, Metrics, Export
+# ---------------------------------------------------------------------------
+
+@app.post("/detect-transfer")
+def detect_transfer_endpoint(memo: str, source_category: str = "", payee: str = "", amount: float = 0.0):
+    """Detect if a transaction is likely a transfer (FR-11)."""
+    result = detect_transfer(memo, source_category, payee, amount)
+    return {
+        "is_transfer": result.is_transfer,
+        "confidence": result.confidence,
+        "reason": result.reason,
+    }
+
+
+@app.get("/metrics")
+def get_metrics(plan_id: str, db: Session = Depends(get_db)):
+    """FR-14: User-facing operational metrics."""
+    plan = db.query(Plan).filter(Plan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+
+    total_transactions = db.query(Transaction).filter(Transaction.plan_id == plan_id, Transaction.deleted == False).count()
+    total_rules = db.query(Rule).filter(Rule.plan_id == plan_id).count()
+    total_accounts = db.query(Account).filter(Account.plan_id == plan_id, Account.closed == False).count()
+    total_categories = db.query(Category).filter(Category.deleted == False).count()
+    total_payees = db.query(Payee).filter(Payee.plan_id == plan_id, Payee.deleted == False).count()
+
+    # Per-category breakdown
+    from sqlalchemy import func
+    category_counts = (
+        db.query(Category.name, func.count(Transaction.id))
+        .join(Transaction, Transaction.category_id == Category.id)
+        .filter(Transaction.plan_id == plan_id, Transaction.deleted == False)
+        .group_by(Category.name)
+        .order_by(func.count(Transaction.id).desc())
+        .limit(15)
+        .all()
+    )
+
+    return {
+        "plan_name": plan.name,
+        "total_transactions": total_transactions,
+        "total_rules": total_rules,
+        "total_accounts": total_accounts,
+        "total_categories": total_categories,
+        "total_payees": total_payees,
+        "training_set_size": total_transactions,
+        "top_categories": [{"name": name, "count": count} for name, count in category_counts],
+    }
+
+
+class ExportRequest(BaseModel):
+    predictions: List[dict]
+    export_type: str = "ynab"  # "ynab" | "review" | "unresolved" | "audit"
+
+@app.post("/export")
+def export_csv(req: ExportRequest):
+    """FR-10.1: Generate various export artifacts."""
+    import json
+
+    if req.export_type == "ynab":
+        lines = ["Date,Payee,Category,Memo,Inflow,Outflow"]
+        for p in req.predictions:
+            if p.get("status") != "accepted":
+                continue
+            memo = p.get("original_memo", "").replace('"', '""')
+            amt = p.get("amount", 0)
+            inflow = f'{amt:.2f}' if amt >= 0 else ""
+            outflow = f'{abs(amt):.2f}' if amt < 0 else ""
+            lines.append(f'{p.get("date", "")},"{p.get("payee", "")}","{p.get("category", "")}","{memo}",{inflow},{outflow}')
+        return {"format": "csv", "filename": "ynab-import.csv", "content": "\n".join(lines)}
+
+    elif req.export_type == "review":
+        lines = ["Date,Memo,Amount,Payee,Category,Confidence,Source,Status"]
+        for p in req.predictions:
+            memo = p.get("original_memo", "").replace('"', '""')
+            lines.append(
+                f'{p.get("date", "")},"{memo}",{p.get("amount", 0)},'
+                f'"{p.get("payee", "")}","{p.get("category", "")}",'
+                f'{p.get("confidence", 0)},{p.get("source", "")},{p.get("status", "")}'
+            )
+        return {"format": "csv", "filename": "review-summary.csv", "content": "\n".join(lines)}
+
+    elif req.export_type == "unresolved":
+        lines = ["Date,Memo,Amount,Source Category,Confidence,Explanation"]
+        for p in req.predictions:
+            if p.get("status") == "accepted":
+                continue
+            memo = p.get("original_memo", "").replace('"', '""')
+            lines.append(
+                f'{p.get("date", "")},"{memo}",{p.get("amount", 0)},'
+                f'"{p.get("source_category", "")}",{p.get("confidence", 0)},'
+                f'"{p.get("explanation", "")}"'
+            )
+        return {"format": "csv", "filename": "unresolved.csv", "content": "\n".join(lines)}
+
+    elif req.export_type == "audit":
+        return {"format": "json", "filename": "audit.json", "content": json.dumps(req.predictions, indent=2)}
+
+    raise HTTPException(status_code=400, detail="Invalid export_type")
+
 
