@@ -59,3 +59,29 @@ class YnabClient:
         if last_knowledge_of_server is not None:
              params["last_knowledge_of_server"] = last_knowledge_of_server
         return self._get(f"/budgets/{budget_id}/transactions", params=params)
+
+    def _post(self, endpoint: str, json_body: Dict[str, Any]) -> Dict[str, Any]:
+        response = self.client.post(endpoint, json=json_body)
+
+        if response.status_code >= 400:
+            error_detail = response.text
+            try:
+                error_detail = response.json().get("error", {}).get("detail", error_detail)
+            except Exception:
+                pass
+            raise YNABAPIError(f"YNAB API Error ({response.status_code}): {error_detail}")
+
+        return response.json().get("data", {})
+
+    def create_transactions(self, budget_id: str, transactions: list) -> Dict[str, Any]:
+        """
+        Create one or more transactions in YNAB (FR-9.2).
+        
+        Each transaction dict should have:
+          account_id, date, amount (milliunits), payee_name, category_id (optional),
+          memo, cleared, import_id (for dedup).
+        """
+        return self._post(
+            f"/budgets/{budget_id}/transactions",
+            {"transactions": transactions},
+        )

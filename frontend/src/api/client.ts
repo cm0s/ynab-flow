@@ -64,3 +64,56 @@ export async function uploadCSV(planId: string, file: File): Promise<UploadResul
 /* ---- Sync ---- */
 export const syncBudgets = () =>
   request<{ status: string }>('/sync/budgets', { method: 'POST' });
+
+/* ---- Accounts ---- */
+export interface Account {
+  id: string;
+  name: string;
+  type: string;
+  closed: boolean;
+}
+
+export const fetchAccounts = (planId: string) =>
+  request<Account[]>(`/plans/${planId}/accounts`);
+
+/* ---- Write-Back ---- */
+export interface WriteBackTransaction {
+  date: string;
+  amount: number;
+  payee_name: string;
+  category_name: string;
+  memo: string;
+  account_id: string;
+  cleared?: string;
+}
+
+export interface WriteBackResultItem {
+  index: number;
+  date: string;
+  payee_name: string;
+  amount: number;
+  status: string;
+  ynab_transaction_id: string | null;
+  error: string | null;
+  import_id: string | null;
+}
+
+export interface WriteBackResponse {
+  mode: string;
+  total: number;
+  created: number;
+  skipped: number;
+  errors: number;
+  results: WriteBackResultItem[];
+}
+
+export function writeBack(
+  planId: string,
+  mode: string,
+  transactions: WriteBackTransaction[],
+): Promise<WriteBackResponse> {
+  return request<WriteBackResponse>('/write-back', {
+    method: 'POST',
+    body: JSON.stringify({ plan_id: planId, mode, transactions }),
+  });
+}

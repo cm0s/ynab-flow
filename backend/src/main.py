@@ -15,6 +15,7 @@ from src.rule_engine import RuleEngine
 from src.orchestrator import Orchestrator
 from src.ml_classifier import MLClassifier
 from src.csv_service import parse_csv, bulk_predict
+from src.write_back_service import WriteBackService, WriteTransaction
 from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule
 
 app = FastAPI(title="YNAB Flow API")
@@ -310,3 +311,72 @@ def list_payees(plan_id: str, db: Session = Depends(get_db)):
         Payee.plan_id == plan_id, Payee.deleted == False
     ).all()
     return [{"id": p.id, "name": p.name} for p in payees]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 endpoints — YNAB Write-Back
+# ---------------------------------------------------------------------------
+
+class WriteBackTransactionItem(BaseModel):
+    date: str
+    amount: float
+    payee_name: str
+    category_name: str = ""
+    memo: str = ""
+    account_id: str
+    cleared: str = "uncleared"
+
+class WriteBackRequest(BaseModel):
+    plan_id: str
+    mode: str = "dry_run"  # "dry_run" | "create" | "create_or_skip"
+    transactions: List[WriteBackTransactionItem]
+
+@app.post("/write-back")
+def write_back(req: WriteBackRequest, db: Session = Depends(get_db)):
+    """Push approved transactions to YNAB (FR-9)."""
+    plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+
+    if req.mode not in ("dry_run", "create", "create_or_skip"):
+        raise HTTPException(status_code=400, detail="Invalid mode. Use: dry_run, create, create_or_skip.")
+
+    client = get_ynab_client()
+    service = WriteBackService(db, client)
+
+    txns = [
+        WriteTransaction(
+            date=t.date,
+            amount=t.amount,
+            payee_name=t.payee_name,
+            category_name=t.category_name,
+            memo=t.memo,
+            account_id=t.account_id,
+            cleared=t.cleared,
+        )
+        for t in req.transactions
+    ]
+
+    result = service.execute(req.plan_id, txns, mode=req.mode)
+
+    return {
+        "mode": result.mode,
+        "total": result.total,
+        "created": result.created,
+        "skipped": result.skipped,
+        "errors": result.errors,
+        "results": [
+            {
+                "index": r.index,
+                "date": r.date,
+                "payee_name": r.payee_name,
+                "amount": r.amount,
+                "status": r.status,
+                "ynab_transaction_id": r.ynab_transaction_id,
+                "error": r.error,
+                "import_id": r.import_id,
+            }
+            for r in result.results
+        ],
+    }
+
