@@ -117,3 +117,46 @@ export function writeBack(
     body: JSON.stringify({ plan_id: planId, mode, transactions }),
   });
 }
+
+/* ---- Rules ---- */
+export interface Rule {
+  id: string;
+  name: string;
+  priority: number;
+  match_type: string;
+  pattern: string;
+  assign_payee: string | null;
+  assign_category: string | null;
+  amount_sign: string | null;
+  amount_min: number | null;
+  amount_max: number | null;
+  account_filter: string | null;
+  category_filter: string | null;
+  flag_review: boolean;
+  flag_ignore: boolean;
+}
+
+export const fetchRules = (planId: string) =>
+  request<Rule[]>(`/rules?plan_id=${planId}`);
+
+export function createRule(rule: {
+  plan_id: string;
+  name: string;
+  priority?: number;
+  match_type: string;
+  pattern: string;
+  assign_payee?: string;
+  assign_category?: string;
+}) {
+  return request<{ status: string; rule_id: string }>('/rules', {
+    method: 'POST',
+    body: JSON.stringify({ priority: 0, flag_review: false, flag_ignore: false, ...rule }),
+  });
+}
+
+export function deleteRule(ruleId: string) {
+  return request<{ status: string }>(`/rules/${ruleId}`, { method: 'DELETE' });
+}
+
+/* ---- Health ---- */
+export const healthCheck = () => request<{ status: string }>('/health');

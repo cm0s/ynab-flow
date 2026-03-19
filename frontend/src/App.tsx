@@ -2,24 +2,28 @@ import { useState, useCallback } from 'react';
 import { useQuery, useMutation, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
-  CheckCircle, AlertCircle, XCircle,
+  CheckCircle, AlertCircle, XCircle, Settings,
 } from 'lucide-react';
-import { fetchPlans, uploadCSV, syncBudgets, fetchAccounts, writeBack } from './api/client';
+import { fetchPlans, uploadCSV, syncBudgets, fetchAccounts, writeBack, createRule } from './api/client';
 import type { Plan, PredictionRow, Account, WriteBackResponse } from './api/client';
 import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
 import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
+import SettingsPage from './components/SettingsPage';
 
 const queryClient = new QueryClient();
+
+type View = 'import' | 'review' | 'push' | 'settings';
 
 function AppContent() {
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
   const [predictions, setPredictions] = useState<PredictionRow[]>([]);
   const [reviewRows, setReviewRows] = useState<ReviewedRow[]>([]);
-  const [view, setView] = useState<'import' | 'review' | 'push'>('import');
+  const [view, setView] = useState<View>('import');
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [writeMode, setWriteMode] = useState<string>('dry_run');
   const [writeResult, setWriteResult] = useState<WriteBackResponse | null>(null);
+  const [ruleToast, setRuleToast] = useState<string | null>(null);
 
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: fetchPlans });
 
@@ -69,12 +73,9 @@ function AppContent() {
   const plans: Plan[] = plansQuery.data || [];
   const accounts: Account[] = (accountsQuery.data || []).filter((a) => !a.closed);
 
-  // Auto-select first plan
   if (plans.length > 0 && !selectedPlanId) {
     setSelectedPlanId(plans[0].id);
   }
-
-  // Auto-select first account
   if (accounts.length > 0 && !selectedAccountId) {
     setSelectedAccountId(accounts[0].id);
   }
@@ -98,6 +99,27 @@ function AppContent() {
     });
   }, []);
 
+  /* ---- Create rule from correction (FR-12) ---- */
+  const handleCreateRule = useCallback(async (row: ReviewedRow) => {
+    if (!selectedPlanId || !row.editedPayee) return;
+    try {
+      await createRule({
+        plan_id: selectedPlanId,
+        name: `${row.merchant_stem || row.cleaned_memo} → ${row.editedPayee}`,
+        match_type: 'contains',
+        pattern: row.merchant_stem || row.cleaned_memo,
+        assign_payee: row.editedPayee,
+        assign_category: row.editedCategory || undefined,
+      });
+      queryClient.invalidateQueries({ queryKey: ['rules', selectedPlanId] });
+      setRuleToast(`Rule created: "${row.merchant_stem}" → ${row.editedPayee}`);
+      setTimeout(() => setRuleToast(null), 3000);
+    } catch (e) {
+      setRuleToast(`Error: ${(e as Error).message}`);
+      setTimeout(() => setRuleToast(null), 3000);
+    }
+  }, [selectedPlanId]);
+
   /* ---- Export CSV ---- */
   const handleExport = () => {
     const accepted = reviewRows.filter((r) => r.status === 'accepted');
@@ -120,21 +142,19 @@ function AppContent() {
 
   const acceptedCount = reviewRows.filter((r) => r.status === 'accepted').length;
 
+  const goBack = () => {
+    if (view === 'push') { setView('review'); setWriteResult(null); }
+    else if (view === 'review') setView('import');
+    else if (view === 'settings') setView('import');
+  };
+
   return (
     <div className="app-layout">
       {/* ---- Header ---- */}
       <header className="app-header">
         <div className="app-header-title">
           {view !== 'import' && (
-            <button
-              className="btn btn-ghost"
-              style={{ padding: '4px 8px', marginRight: 4 }}
-              onClick={() => {
-                if (view === 'push') setView('review');
-                else setView('import');
-                setWriteResult(null);
-              }}
-            >
+            <button className="btn btn-ghost" style={{ padding: '4px 8px', marginRight: 4 }} onClick={goBack}>
               <ArrowLeft size={18} />
             </button>
           )}
@@ -144,10 +164,7 @@ function AppContent() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {plans.length > 0 && (
             <div className="select-wrapper">
-              <select
-                value={selectedPlanId}
-                onChange={(e) => setSelectedPlanId(e.target.value)}
-              >
+              <select value={selectedPlanId} onChange={(e) => setSelectedPlanId(e.target.value)}>
                 {plans.map((p) => (
                   <option key={p.id} value={p.id}>{p.name}</option>
                 ))}
@@ -178,14 +195,34 @@ function AppContent() {
             ) : (
               <RefreshCw size={16} />
             )}
-            Sync YNAB
+            Sync
+          </button>
+          <button
+            className={`btn ${view === 'settings' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => setView(view === 'settings' ? 'import' : 'settings')}
+            title="Settings"
+          >
+            <Settings size={18} />
           </button>
         </div>
       </header>
 
+      {/* ---- Toast ---- */}
+      {ruleToast && (
+        <div style={{
+          position: 'fixed', bottom: 24, right: 24, zIndex: 1000,
+          background: 'var(--bg-card)', border: '1px solid var(--accent)',
+          borderRadius: 'var(--radius-md)', padding: '12px 20px',
+          boxShadow: 'var(--shadow-glow)', color: 'var(--text-primary)',
+          fontSize: '0.875rem', animation: 'fadeInUp 0.3s ease',
+        }}>
+          {ruleToast}
+        </div>
+      )}
+
       {/* ---- Main ---- */}
       <main className="app-main">
-        {/* ---- IMPORT VIEW ---- */}
+        {/* IMPORT */}
         {view === 'import' && (
           <>
             <section style={{ marginBottom: 32 }} className="animate-in">
@@ -195,8 +232,7 @@ function AppContent() {
                 disabled={uploadMutation.isPending || !selectedPlanId}
               />
               {uploadMutation.isPending && (
-                <p style={{ textAlign: 'center', marginTop: 16, color: 'var(--text-muted)' }}
-                   className="loading-pulse">
+                <p style={{ textAlign: 'center', marginTop: 16, color: 'var(--text-muted)' }} className="loading-pulse">
                   <Loader2 size={20} style={{ verticalAlign: 'middle', marginRight: 8 }} />
                   Processing transactions…
                 </p>
@@ -207,7 +243,6 @@ function AppContent() {
                 </p>
               )}
             </section>
-
             {predictions.length > 0 && (
               <section className="animate-in" style={{ animationDelay: '100ms' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
@@ -219,7 +254,6 @@ function AppContent() {
                 <StatsBar predictions={predictions} />
               </section>
             )}
-
             {predictions.length === 0 && !uploadMutation.isPending && (
               <section className="animate-in" style={{ textAlign: 'center', padding: '64px 0', color: 'var(--text-muted)' }}>
                 <Workflow size={64} style={{ color: 'var(--accent-subtle)', marginBottom: 16 }} />
@@ -230,7 +264,7 @@ function AppContent() {
           </>
         )}
 
-        {/* ---- REVIEW VIEW ---- */}
+        {/* REVIEW */}
         {view === 'review' && (
           <section className="animate-in">
             <h2 style={{ marginBottom: 16 }}>Review Transactions</h2>
@@ -239,65 +273,47 @@ function AppContent() {
               rows={reviewRows}
               onUpdateRow={handleUpdateRow}
               onBulkAction={handleBulkAction}
+              onCreateRule={handleCreateRule}
             />
           </section>
         )}
 
-        {/* ---- PUSH TO YNAB VIEW ---- */}
+        {/* PUSH */}
         {view === 'push' && (
           <section className="animate-in">
             <h2 style={{ marginBottom: 24 }}>Push to YNAB</h2>
-
             <div className="card" style={{ padding: 32, maxWidth: 600 }}>
               <h3 style={{ marginBottom: 20 }}>Write-Back Configuration</h3>
-
-              {/* Account selection */}
               <div style={{ marginBottom: 20 }}>
-                <label style={{ display: 'block', marginBottom: 6, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                  Target Account
-                </label>
+                <label style={{ display: 'block', marginBottom: 6, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Target Account</label>
                 <div className="select-wrapper">
-                  <select
-                    value={selectedAccountId}
-                    onChange={(e) => setSelectedAccountId(e.target.value)}
-                  >
+                  <select value={selectedAccountId} onChange={(e) => setSelectedAccountId(e.target.value)}>
                     {accounts.map((a) => (
                       <option key={a.id} value={a.id}>{a.name} ({a.type})</option>
                     ))}
                   </select>
                 </div>
               </div>
-
-              {/* Mode selection */}
               <div style={{ marginBottom: 20 }}>
-                <label style={{ display: 'block', marginBottom: 6, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                  Write Mode
-                </label>
+                <label style={{ display: 'block', marginBottom: 6, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Write Mode</label>
                 <div className="select-wrapper">
-                  <select
-                    value={writeMode}
-                    onChange={(e) => setWriteMode(e.target.value)}
-                  >
-                    <option value="dry_run">🔍 Dry Run — validate only, no changes</option>
-                    <option value="create">✏️ Create — create all transactions</option>
+                  <select value={writeMode} onChange={(e) => setWriteMode(e.target.value)}>
+                    <option value="dry_run">🔍 Dry Run — validate only</option>
+                    <option value="create">✏️ Create — create all</option>
                     <option value="create_or_skip">🛡️ Create or Skip — skip duplicates</option>
                   </select>
                 </div>
               </div>
-
-              {/* Summary */}
               <div style={{
                 padding: 16, borderRadius: 'var(--radius-md)', background: 'var(--bg-surface)',
                 marginBottom: 24, fontSize: '0.9rem',
               }}>
                 <strong style={{ color: 'var(--text-primary)' }}>{acceptedCount}</strong>
-                <span style={{ color: 'var(--text-secondary)' }}> accepted transactions will be written to </span>
+                <span style={{ color: 'var(--text-secondary)' }}> accepted transactions → </span>
                 <strong style={{ color: 'var(--text-primary)' }}>
                   {accounts.find((a) => a.id === selectedAccountId)?.name || '—'}
                 </strong>
               </div>
-
-              {/* Action button */}
               <button
                 className="btn btn-primary"
                 style={{ width: '100%', justifyContent: 'center', padding: '14px 24px' }}
@@ -310,7 +326,6 @@ function AppContent() {
                   <><UploadIcon size={18} /> {writeMode === 'dry_run' ? 'Run Dry Validation' : 'Push to YNAB'}</>
                 )}
               </button>
-
               {writeMutation.isError && (
                 <p style={{ marginTop: 16, color: 'var(--danger)', textAlign: 'center' }}>
                   Error: {(writeMutation.error as Error).message}
@@ -318,16 +333,14 @@ function AppContent() {
               )}
             </div>
 
-            {/* Write-back results */}
             {writeResult && (
               <div className="card animate-in" style={{ padding: 32, marginTop: 24 }}>
                 <h3 style={{ marginBottom: 20 }}>
                   {writeResult.mode === 'dry_run' ? '🔍 Dry Run Results' : '✅ Write-Back Results'}
                 </h3>
-
                 <div className="stats-row">
                   <div className="card stat-card">
-                    <div className="stat-value" style={{ color: 'var(--text-primary)' }}>{writeResult.total}</div>
+                    <div className="stat-value">{writeResult.total}</div>
                     <div className="stat-label">Total</div>
                   </div>
                   <div className="card stat-card">
@@ -343,7 +356,7 @@ function AppContent() {
                         <AlertCircle size={18} style={{ verticalAlign: 'middle', marginRight: 6 }} />
                         {writeResult.skipped}
                       </div>
-                      <div className="stat-label">Skipped (duplicates)</div>
+                      <div className="stat-label">Skipped</div>
                     </div>
                   )}
                   {writeResult.errors > 0 && (
@@ -356,20 +369,11 @@ function AppContent() {
                     </div>
                   )}
                 </div>
-
-                {/* Detail table */}
                 {writeResult.results.length > 0 && (
                   <div style={{ overflow: 'auto', maxHeight: '40vh', marginTop: 16 }}>
                     <table className="results-table">
                       <thead>
-                        <tr>
-                          <th>#</th>
-                          <th>Date</th>
-                          <th>Payee</th>
-                          <th>Amount</th>
-                          <th>Status</th>
-                          <th>YNAB ID</th>
-                        </tr>
+                        <tr><th>#</th><th>Date</th><th>Payee</th><th>Amount</th><th>Status</th><th>YNAB ID</th></tr>
                       </thead>
                       <tbody>
                         {writeResult.results.map((r) => (
@@ -400,6 +404,11 @@ function AppContent() {
               </div>
             )}
           </section>
+        )}
+
+        {/* SETTINGS */}
+        {view === 'settings' && (
+          <SettingsPage planId={selectedPlanId} />
         )}
       </main>
     </div>

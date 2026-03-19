@@ -60,9 +60,10 @@ interface Props {
   rows: ReviewedRow[];
   onUpdateRow: (index: number, update: Partial<ReviewedRow>) => void;
   onBulkAction: (indices: number[], status: ReviewStatus) => void;
+  onCreateRule?: (row: ReviewedRow) => void;
 }
 
-export default function ReviewTable({ rows, onUpdateRow, onBulkAction }: Props) {
+export default function ReviewTable({ rows, onUpdateRow, onBulkAction, onCreateRule }: Props) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -341,6 +342,16 @@ export default function ReviewTable({ rows, onUpdateRow, onBulkAction }: Props) 
                   {/* Actions */}
                   <td>
                     <div style={{ display: 'flex', gap: 4 }}>
+                      {onCreateRule && row.editedPayee && (
+                        <button
+                          className="btn btn-ghost"
+                          style={{ padding: '4px 8px' }}
+                          onClick={() => onCreateRule(row)}
+                          title="Create rule from this correction"
+                        >
+                          <Zap size={14} color="var(--accent-light)" />
+                        </button>
+                      )}
                       {isEditing ? (
                         <button
                           className="btn btn-ghost"
