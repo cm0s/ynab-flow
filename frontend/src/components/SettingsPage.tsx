@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Settings as SettingsIcon, Key, Gauge, Shield, RefreshCw, Loader2 } from 'lucide-react';
-import { syncBudgets } from '../api/client';
+import { Settings as SettingsIcon, Key, Gauge, Shield, RefreshCw, Loader2, Brain, Database } from 'lucide-react';
+import { syncBudgets, syncPlanData, trainModels } from '../api/client';
 import RulesManager from './RulesManager';
 
 interface Props {
@@ -17,6 +17,18 @@ export default function SettingsPage({ planId }: Props) {
   const syncMutation = useMutation({
     mutationFn: syncBudgets,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['plans'] }),
+  });
+
+  const fullSyncMutation = useMutation({
+    mutationFn: () => syncPlanData(planId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['metrics', planId] });
+      queryClient.invalidateQueries({ queryKey: ['accounts', planId] });
+    },
+  });
+
+  const trainMutation = useMutation({
+    mutationFn: () => trainModels(planId),
   });
 
   const inputStyle: React.CSSProperties = {
@@ -69,21 +81,89 @@ export default function SettingsPage({ planId }: Props) {
                 API token is managed via the backend .env file for security.
               </p>
             </div>
-            <button
-              className="btn btn-secondary"
-              onClick={() => syncMutation.mutate()}
-              disabled={syncMutation.isPending}
-            >
-              {syncMutation.isPending ? (
-                <Loader2 size={16} className="loading-pulse" />
-              ) : (
-                <RefreshCw size={16} />
-              )}
-              Sync All Data from YNAB
-            </button>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => syncMutation.mutate()}
+                disabled={syncMutation.isPending}
+              >
+                {syncMutation.isPending ? (
+                  <Loader2 size={16} className="loading-pulse" />
+                ) : (
+                  <RefreshCw size={16} />
+                )}
+                Sync Budgets
+              </button>
+            </div>
             {syncMutation.isSuccess && (
               <p style={{ marginTop: 8, color: 'var(--success)', fontSize: '0.85rem' }}>
-                ✓ Sync completed successfully
+                ✓ Budget sync completed
+              </p>
+            )}
+          </div>
+
+          {/* Data Sync — full sync with transactions */}
+          <div className="card" style={{ padding: 24 }}>
+            <h3 style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Database size={18} color="var(--accent)" /> Historical Data Sync
+            </h3>
+            <p style={{ marginBottom: 16, fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              Syncs <strong>categories, payees, and all transactions</strong> from YNAB for the selected plan.
+              This data is used by the historical matcher and ML classifier to auto-classify new imports.
+            </p>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                className="btn btn-primary"
+                onClick={() => fullSyncMutation.mutate()}
+                disabled={fullSyncMutation.isPending || !planId}
+              >
+                {fullSyncMutation.isPending ? (
+                  <><Loader2 size={16} className="loading-pulse" /> Syncing transactions…</>
+                ) : (
+                  <><Database size={16} /> Full Sync (Categories + Payees + Transactions)</>
+                )}
+              </button>
+            </div>
+            {fullSyncMutation.isSuccess && (
+              <p style={{ marginTop: 8, color: 'var(--success)', fontSize: '0.85rem' }}>
+                ✓ Full sync completed — historical transactions are now available for classification
+              </p>
+            )}
+            {fullSyncMutation.isError && (
+              <p style={{ marginTop: 8, color: 'var(--danger)', fontSize: '0.85rem' }}>
+                Error: {(fullSyncMutation.error as Error).message}
+              </p>
+            )}
+          </div>
+
+          {/* ML Training */}
+          <div className="card" style={{ padding: 24 }}>
+            <h3 style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
+              <Brain size={18} color="var(--accent)" /> ML Model Training
+            </h3>
+            <p style={{ marginBottom: 16, fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              Train the machine learning model from your synced YNAB transaction history.
+              Run this <strong>after a full sync</strong> to enable ML-based auto-classification.
+            </p>
+            <button
+              className="btn btn-secondary"
+              onClick={() => trainMutation.mutate()}
+              disabled={trainMutation.isPending || !planId}
+            >
+              {trainMutation.isPending ? (
+                <><Loader2 size={16} className="loading-pulse" /> Training…</>
+              ) : (
+                <><Brain size={16} /> Train ML Model</>
+              )}
+            </button>
+            {trainMutation.isSuccess && (
+              <p style={{ marginTop: 8, color: 'var(--success)', fontSize: '0.85rem' }}>
+                ✓ ML model trained successfully
+              </p>
+            )}
+            {trainMutation.isError && (
+              <p style={{ marginTop: 8, color: 'var(--danger)', fontSize: '0.85rem' }}>
+                Error: {(trainMutation.error as Error).message}
               </p>
             )}
           </div>

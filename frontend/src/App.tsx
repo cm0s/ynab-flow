@@ -4,7 +4,7 @@ import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
   CheckCircle, AlertCircle, XCircle, Settings, BarChart3,
 } from 'lucide-react';
-import { fetchPlans, uploadCSV, syncBudgets, fetchAccounts, writeBack, createRule } from './api/client';
+import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, writeBack, createRule } from './api/client';
 import type { Plan, PredictionRow, Account, WriteBackResponse } from './api/client';
 import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
@@ -35,9 +35,17 @@ function AppContent() {
   });
 
   const syncMutation = useMutation({
-    mutationFn: syncBudgets,
+    mutationFn: async () => {
+      await syncBudgets();
+      // After budgets are synced, if we have a selected plan, sync its full data
+      if (selectedPlanId) {
+        await syncPlanData(selectedPlanId);
+      }
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['plans'] });
+      queryClient.invalidateQueries({ queryKey: ['metrics', selectedPlanId] });
+      queryClient.invalidateQueries({ queryKey: ['accounts', selectedPlanId] });
     },
   });
 

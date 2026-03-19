@@ -65,6 +65,12 @@ export async function uploadCSV(planId: string, file: File): Promise<UploadResul
 export const syncBudgets = () =>
   request<{ status: string }>('/sync/budgets', { method: 'POST' });
 
+export const syncPlanData = (planId: string) =>
+  request<{ status: string }>(`/sync/plan/${planId}`, { method: 'POST' });
+
+export const trainModels = (planId: string) =>
+  request<{ status: string }>(`/train?plan_id=${planId}`, { method: 'POST' });
+
 /* ---- Accounts ---- */
 export interface Account {
   id: string;
