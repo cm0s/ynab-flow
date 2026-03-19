@@ -1,0 +1,208 @@
+"""
+FR-9: YNAB Write-Back Service
+
+Validates and pushes approved transactions to YNAB via API.
+Supports dry-run, create-only, and create-or-skip-if-duplicate modes.
+"""
+
+import hashlib
+import logging
+from dataclasses import dataclass, field
+from typing import List, Optional
+from datetime import datetime
+
+from sqlalchemy.orm import Session
+from src.ynab_client import YnabClient, YNABAPIError
+from src.models import Plan, Account, Category, Payee
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class WriteTransaction:
+    """A single transaction ready for write-back."""
+    date: str              # YYYY-MM-DD
+    amount: float          # Positive = inflow, negative = outflow (user units)
+    payee_name: str
+    category_name: str
+    memo: str
+    account_id: str        # Local account ID
+    cleared: str = "uncleared"
+
+
+@dataclass
+class WriteResult:
+    """Result of a single write operation."""
+    index: int
+    date: str
+    payee_name: str
+    amount: float
+    status: str              # "created" | "skipped" | "error" | "dry_run_ok" | "dry_run_error"
+    ynab_transaction_id: Optional[str] = None
+    error: Optional[str] = None
+    import_id: Optional[str] = None
+
+
+@dataclass
+class WriteBackResult:
+    """Aggregate result of the entire write-back operation."""
+    mode: str
+    total: int = 0
+    created: int = 0
+    skipped: int = 0
+    errors: int = 0
+    results: List[WriteResult] = field(default_factory=list)
+
+
+class WriteBackService:
+    """
+    Orchestrates writing approved transactions to YNAB (FR-9).
+    """
+
+    def __init__(self, db: Session, ynab_client: YnabClient):
+        self.db = db
+        self.ynab = ynab_client
+
+    def execute(
+        self,
+        plan_id: str,
+        transactions: List[WriteTransaction],
+        mode: str = "dry_run",  # "dry_run" | "create" | "create_or_skip"
+    ) -> WriteBackResult:
+        """
+        Validate and optionally write transactions to YNAB.
+        """
+        plan = self.db.query(Plan).filter(Plan.id == plan_id).first()
+        if not plan:
+            raise ValueError(f"Plan {plan_id} not found")
+
+        result = WriteBackResult(mode=mode, total=len(transactions))
+
+        # Build YNAB payloads with validation
+        payloads = []
+        for i, txn in enumerate(transactions):
+            wr = self._validate_and_build(plan, txn, i)
+            result.results.append(wr)
+
+            if wr.status.startswith("dry_run_error") or wr.status == "error":
+                result.errors += 1
+            elif mode == "dry_run":
+                wr.status = "dry_run_ok"
+            else:
+                payloads.append((i, wr))
+
+        if mode == "dry_run" or not payloads:
+            return result
+
+        # Build the YNAB transaction list
+        ynab_txns = []
+        payload_indices = []
+        for idx, wr in payloads:
+            txn = transactions[idx]
+            account = self.db.query(Account).filter(Account.id == txn.account_id).first()
+            ynab_account_id = account.ynab_account_id if account else ""
+
+            # YNAB amount is in milliunits (multiply by 1000)
+            millis = int(txn.amount * 1000)
+
+            ynab_txn = {
+                "account_id": ynab_account_id,
+                "date": txn.date,
+                "amount": millis,
+                "payee_name": txn.payee_name,
+                "memo": txn.memo[:200] if txn.memo else "",
+                "cleared": txn.cleared,
+                "import_id": wr.import_id,
+            }
+
+            # Resolve category to YNAB ID if possible
+            cat_id = self._resolve_category_id(plan.id, txn.category_name)
+            if cat_id:
+                ynab_txn["category_id"] = cat_id
+
+            ynab_txns.append(ynab_txn)
+            payload_indices.append(idx)
+
+        # Send to YNAB
+        try:
+            response = self.ynab.create_transactions(plan.ynab_plan_id, ynab_txns)
+            created_ids = response.get("transaction_ids", [])
+            duplicate_ids = response.get("duplicate_import_ids", [])
+
+            for j, idx in enumerate(payload_indices):
+                wr = result.results[idx]
+                if j < len(created_ids):
+                    wr.ynab_transaction_id = created_ids[j]
+                    wr.status = "created"
+                    result.created += 1
+                elif wr.import_id in duplicate_ids:
+                    wr.status = "skipped"
+                    result.skipped += 1
+                else:
+                    wr.status = "created"
+                    result.created += 1
+
+        except YNABAPIError as e:
+            for idx in payload_indices:
+                wr = result.results[idx]
+                wr.status = "error"
+                wr.error = str(e)
+                result.errors += 1
+
+        return result
+
+    def _validate_and_build(self, plan: Plan, txn: WriteTransaction, index: int) -> WriteResult:
+        """Validate a single transaction and build its WriteResult (FR-9.3)."""
+        wr = WriteResult(
+            index=index,
+            date=txn.date,
+            payee_name=txn.payee_name,
+            amount=txn.amount,
+            status="pending",
+            import_id=self._generate_import_id(txn),
+        )
+
+        # Validate account exists
+        account = self.db.query(Account).filter(Account.id == txn.account_id).first()
+        if not account:
+            wr.status = "dry_run_error"
+            wr.error = f"Account not found: {txn.account_id}"
+            return wr
+
+        # Validate date format
+        try:
+            datetime.strptime(txn.date, "%Y-%m-%d")
+        except ValueError:
+            wr.status = "dry_run_error"
+            wr.error = f"Invalid date format: {txn.date}"
+            return wr
+
+        # Validate payee name
+        if not txn.payee_name.strip():
+            wr.status = "dry_run_error"
+            wr.error = "Payee name is required"
+            return wr
+
+        return wr
+
+    @staticmethod
+    def _generate_import_id(txn: WriteTransaction) -> str:
+        """
+        Generate a deterministic import_id for deduplication (FR-9.3).
+        YNAB uses import_id to prevent duplicates on repeated imports.
+        """
+        raw = f"{txn.date}:{txn.amount:.2f}:{txn.payee_name}:{txn.memo[:50]}"
+        digest = hashlib.md5(raw.encode()).hexdigest()[:8]
+        return f"YNAB-Flow:{digest}"
+
+    def _resolve_category_id(self, plan_id: str, category_name: str) -> Optional[str]:
+        """Look up the YNAB category ID from the local database."""
+        if not category_name:
+            return None
+        cat = (
+            self.db.query(Category)
+            .join(Category.category_group)
+            .filter(Category.name == category_name, Category.deleted == False)
+            .first()
+        )
+        return cat.ynab_category_id if cat else None
