@@ -20,7 +20,7 @@ export default function SettingsPage({ planId }: Props) {
   });
 
   const fullSyncMutation = useMutation({
-    mutationFn: () => syncPlanData(planId),
+    mutationFn: () => syncPlanData(planId, true),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['metrics', planId] });
       queryClient.invalidateQueries({ queryKey: ['accounts', planId] });

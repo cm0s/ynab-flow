@@ -47,6 +47,7 @@ def sync_budgets(
 @app.post("/sync/plan/{plan_id}")
 def sync_plan_data(
     plan_id: str,
+    full: bool = Query(False, description="Reset knowledge and re-fetch everything"),
     db: Session = Depends(get_db),
     client: YnabClient = Depends(get_ynab_client)
 ):
@@ -54,7 +55,13 @@ def sync_plan_data(
     plan = db.query(Plan).filter(Plan.id == plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found in local database.")
-        
+
+    if full:
+        plan.last_server_knowledge = None
+        plan.last_knowledge_payees = None
+        plan.last_knowledge_transactions = None
+        db.flush()
+
     try:
         service = SyncService(db, client)
         service.sync_all(plan)
