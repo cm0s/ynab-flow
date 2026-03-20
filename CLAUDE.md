@@ -74,6 +74,10 @@ Alembic manages SQLite migrations in `backend/alembic/`. The database file is `b
 
 Backend tests use pytest with respx for HTTP mocking. Test files mirror source files: `test_normalizer.py`, `test_rule_engine.py`, `test_historical_matcher.py`, `test_orchestrator.py`, `test_csv_service.py`, `test_sync.py`, `test_transfer_detector.py`, `test_main.py`.
 
+## Workflow
+
+Always commit changes after finishing a task, but always ask the user for confirmation before committing changes. Never commit automatically after completing a task.
+
 ## Environment
 
 `backend/.env` contains `YNAB_API_KEY` (loaded via python-dotenv). Never commit this file.
