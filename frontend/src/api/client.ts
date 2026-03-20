@@ -82,6 +82,16 @@ export interface Account {
 export const fetchAccounts = (planId: string) =>
   request<Account[]>(`/plans/${planId}/accounts`);
 
+/* ---- Categories ---- */
+export interface CategoryGroup {
+  id: string;
+  name: string;
+  categories: { id: string; name: string }[];
+}
+
+export const fetchCategories = (planId: string) =>
+  request<CategoryGroup[]>(`/plans/${planId}/categories`);
+
 /* ---- Write-Back ---- */
 export interface WriteBackTransaction {
   date: string;
