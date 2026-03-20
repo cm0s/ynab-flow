@@ -158,7 +158,6 @@ class MLClassifier:
             ("clf", LogisticRegression(
                 max_iter=1000,
                 solver="lbfgs",
-                multi_class="multinomial",
                 C=1.0,
             )),
         ])
