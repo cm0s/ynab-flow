@@ -1,8 +1,9 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback } from 'react';
 import type { PredictionRow } from '../api/client';
 import {
   CheckCircle, AlertTriangle, HelpCircle, Zap, Clock, Brain,
   Check, X, Eye, EyeOff, Filter, CheckCheck, Pencil, Search,
+  ArrowUp, ArrowDown, ArrowUpDown,
 } from 'lucide-react';
 
 /* ---- Review state per row ---- */
@@ -63,15 +64,29 @@ interface Props {
   onCreateRule?: (row: ReviewedRow) => void;
 }
 
+type SortKey = 'date' | 'memo' | 'amount' | 'payee' | 'category' | 'source_category' | 'source' | 'confidence' | 'status';
+type SortDir = 'asc' | 'desc';
+
 export default function ReviewTable({ rows, onUpdateRow, onBulkAction, onCreateRule }: Props) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [editingRow, setEditingRow] = useState<number | null>(null);
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>('asc');
 
-  /* ---- Filtering ---- */
+  const toggleSort = useCallback((key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
+    } else {
+      setSortKey(key);
+      setSortDir('asc');
+    }
+  }, [sortKey]);
+
+  /* ---- Filtering + Sorting ---- */
   const filtered = useMemo(() => {
-    return rows
+    const result = rows
       .map((r, i) => ({ row: r, originalIndex: i }))
       .filter(({ row }) => {
         if (filter !== 'all' && row.status !== filter) return false;
@@ -87,7 +102,31 @@ export default function ReviewTable({ rows, onUpdateRow, onBulkAction, onCreateR
         }
         return true;
       });
-  }, [rows, filter, search]);
+
+    if (sortKey) {
+      const dir = sortDir === 'asc' ? 1 : -1;
+      result.sort((a, b) => {
+        let va: string | number, vb: string | number;
+        switch (sortKey) {
+          case 'date': va = a.row.date; vb = b.row.date; break;
+          case 'memo': va = (a.row.merchant_stem || a.row.cleaned_memo).toLowerCase(); vb = (b.row.merchant_stem || b.row.cleaned_memo).toLowerCase(); break;
+          case 'amount': va = a.row.amount; vb = b.row.amount; break;
+          case 'payee': va = (a.row.editedPayee || '').toLowerCase(); vb = (b.row.editedPayee || '').toLowerCase(); break;
+          case 'category': va = (a.row.editedCategory || '').toLowerCase(); vb = (b.row.editedCategory || '').toLowerCase(); break;
+          case 'source_category': va = (a.row.source_category || '').toLowerCase(); vb = (b.row.source_category || '').toLowerCase(); break;
+          case 'source': va = a.row.source; vb = b.row.source; break;
+          case 'confidence': va = a.row.confidence; vb = b.row.confidence; break;
+          case 'status': va = a.row.status; vb = b.row.status; break;
+          default: return 0;
+        }
+        if (va < vb) return -1 * dir;
+        if (va > vb) return 1 * dir;
+        return 0;
+      });
+    }
+
+    return result;
+  }, [rows, filter, search, sortKey, sortDir]);
 
   /* ---- Selection ---- */
   const toggleSelect = (idx: number) => {
@@ -212,15 +251,30 @@ export default function ReviewTable({ rows, onUpdateRow, onBulkAction, onCreateR
                   style={{ accentColor: 'var(--accent)' }}
                 />
               </th>
-              <th>Date</th>
-              <th>Memo</th>
-              <th>Amount</th>
-              <th>Payee</th>
-              <th>Category</th>
-              <th>Source Cat.</th>
-              <th>Source</th>
-              <th>Conf.</th>
-              <th>Status</th>
+              {([
+                ['date', 'Date'],
+                ['memo', 'Memo'],
+                ['amount', 'Amount'],
+                ['payee', 'Payee'],
+                ['category', 'Category'],
+                ['source_category', 'Source Cat.'],
+                ['source', 'Source'],
+                ['confidence', 'Conf.'],
+                ['status', 'Status'],
+              ] as [SortKey, string][]).map(([key, label]) => (
+                <th
+                  key={key}
+                  onClick={() => toggleSort(key)}
+                  style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    {label}
+                    {sortKey === key
+                      ? (sortDir === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />)
+                      : <ArrowUpDown size={12} style={{ opacity: 0.3 }} />}
+                  </span>
+                </th>
+              ))}
               <th style={{ width: 100 }}>Actions</th>
             </tr>
           </thead>
