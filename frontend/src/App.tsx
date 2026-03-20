@@ -4,8 +4,8 @@ import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
   CheckCircle, AlertCircle, XCircle, Settings, BarChart3,
 } from 'lucide-react';
-import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, writeBack, createRule } from './api/client';
-import type { Plan, PredictionRow, Account, WriteBackResponse } from './api/client';
+import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, writeBack, createRule } from './api/client';
+import type { Plan, PredictionRow, Account, CategoryGroup, WriteBackResponse } from './api/client';
 import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
 import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
@@ -31,6 +31,12 @@ function AppContent() {
   const accountsQuery = useQuery({
     queryKey: ['accounts', selectedPlanId],
     queryFn: () => fetchAccounts(selectedPlanId),
+    enabled: !!selectedPlanId,
+  });
+
+  const categoriesQuery = useQuery({
+    queryKey: ['categories', selectedPlanId],
+    queryFn: () => fetchCategories(selectedPlanId),
     enabled: !!selectedPlanId,
   });
 
@@ -81,6 +87,7 @@ function AppContent() {
 
   const plans: Plan[] = plansQuery.data || [];
   const accounts: Account[] = (accountsQuery.data || []).filter((a) => !a.closed);
+  const categoryGroups: CategoryGroup[] = categoriesQuery.data || [];
 
   if (plans.length > 0 && !selectedPlanId) {
     setSelectedPlanId(plans[0].id);
@@ -288,6 +295,7 @@ function AppContent() {
             <StatsBar predictions={predictions} />
             <ReviewTable
               rows={reviewRows}
+              categoryGroups={categoryGroups}
               onUpdateRow={handleUpdateRow}
               onBulkAction={handleBulkAction}
               onCreateRule={handleCreateRule}

@@ -1,5 +1,6 @@
-import { useState, useMemo, useCallback } from 'react';
-import type { PredictionRow } from '../api/client';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
+import type { PredictionRow, CategoryGroup } from '../api/client';
 import {
   CheckCircle, AlertTriangle, HelpCircle, Zap, Clock, Brain,
   Check, X, Eye, EyeOff, Filter, CheckCheck, Pencil, Search,
@@ -56,9 +57,120 @@ function formatAmount(amount: number) {
   return amount >= 0 ? `+${abs}` : `-${abs}`;
 }
 
+/* ---- Category Picker ---- */
+function CategoryPicker({
+  value,
+  groups,
+  onChange,
+}: {
+  value: string;
+  groups: CategoryGroup[];
+  onChange: (name: string) => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(true);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  // Position the dropdown based on the input's screen position
+  useEffect(() => {
+    if (open && inputRef.current) {
+      const rect = inputRef.current.getBoundingClientRect();
+      setPos({ top: rect.bottom + 2, left: rect.left });
+    }
+  }, [open, query]);
+
+  // Close on outside click
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        inputRef.current && !inputRef.current.contains(target) &&
+        dropdownRef.current && !dropdownRef.current.contains(target)
+      ) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const q = query.toLowerCase();
+  const filtered = groups
+    .map((g) => ({
+      ...g,
+      categories: g.categories.filter((c) => c.name.toLowerCase().includes(q)),
+    }))
+    .filter((g) => g.categories.length > 0);
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        autoFocus
+        value={query}
+        onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
+        onFocus={() => setOpen(true)}
+        placeholder={value || 'Search category…'}
+        style={{
+          width: 160, padding: '4px 6px', background: 'var(--bg-secondary)',
+          border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)',
+          color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: '0.8rem',
+        }}
+      />
+      {open && pos && createPortal(
+        <div
+          ref={dropdownRef}
+          style={{
+            position: 'fixed', top: pos.top, left: pos.left, zIndex: 9999,
+            width: 280, maxHeight: 260, overflowY: 'auto',
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+          }}
+        >
+          {filtered.length === 0 && (
+            <div style={{ padding: '8px 12px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+              No categories found
+            </div>
+          )}
+          {filtered.map((g) => (
+            <div key={g.id}>
+              <div style={{
+                padding: '6px 12px', fontSize: '0.7rem', fontWeight: 600,
+                color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em',
+                background: 'var(--bg-surface)', position: 'sticky', top: 0,
+              }}>
+                {g.name}
+              </div>
+              {g.categories.map((c) => (
+                <div
+                  key={c.id}
+                  onMouseDown={(e) => { e.preventDefault(); onChange(c.name); setOpen(false); }}
+                  style={{
+                    padding: '6px 12px 6px 20px', fontSize: '0.8rem', cursor: 'pointer',
+                    color: c.name === value ? 'var(--accent)' : 'var(--text-primary)',
+                    background: c.name === value ? 'var(--bg-surface)' : 'transparent',
+                  }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface)')}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = c.name === value ? 'var(--bg-surface)' : 'transparent')}
+                >
+                  {c.name}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 /* ---- Props ---- */
 interface Props {
   rows: ReviewedRow[];
+  categoryGroups: CategoryGroup[];
   onUpdateRow: (index: number, update: Partial<ReviewedRow>) => void;
   onBulkAction: (indices: number[], status: ReviewStatus) => void;
   onCreateRule?: (row: ReviewedRow) => void;
@@ -67,7 +179,7 @@ interface Props {
 type SortKey = 'date' | 'memo' | 'amount' | 'payee' | 'category' | 'source_category' | 'source' | 'confidence' | 'status';
 type SortDir = 'asc' | 'desc';
 
-export default function ReviewTable({ rows, onUpdateRow, onBulkAction, onCreateRule }: Props) {
+export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkAction, onCreateRule }: Props) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -334,17 +446,13 @@ export default function ReviewTable({ rows, onUpdateRow, onBulkAction, onCreateR
                     )}
                   </td>
 
-                  {/* Category — editable */}
+                  {/* Category — editable (select from existing) */}
                   <td>
                     {isEditing ? (
-                      <input
+                      <CategoryPicker
                         value={row.editedCategory}
-                        onChange={(e) => onUpdateRow(originalIndex, { editedCategory: e.target.value })}
-                        style={{
-                          width: 140, padding: '4px 6px', background: 'var(--bg-secondary)',
-                          border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)',
-                          color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: '0.8rem',
-                        }}
+                        groups={categoryGroups}
+                        onChange={(name) => onUpdateRow(originalIndex, { editedCategory: name })}
                       />
                     ) : (
                       <span style={{ color: row.editedCategory ? 'var(--text-primary)' : 'var(--text-muted)' }}>
