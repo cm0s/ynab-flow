@@ -15,7 +15,9 @@ class Plan(Base):
     ynab_plan_id = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=False)
     is_default = Column(Boolean, default=False)
-    last_server_knowledge = Column(String, nullable=True)
+    last_server_knowledge = Column(String, nullable=True)  # legacy / categories
+    last_knowledge_payees = Column(String, nullable=True)
+    last_knowledge_transactions = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

@@ -97,7 +97,7 @@ class SyncService:
 
     def sync_payees(self, plan: Plan):
          """Fetches payees, using delta sync"""
-         server_knowledge = int(plan.last_server_knowledge) if plan.last_server_knowledge else None
+         server_knowledge = int(plan.last_knowledge_payees) if plan.last_knowledge_payees else None
          data = self.client.get_payees(plan.ynab_plan_id, last_knowledge_of_server=server_knowledge)
          
          for payee_data in data.get("payees", []):
@@ -118,13 +118,13 @@ class SyncService:
                  
          new_knowledge = data.get("server_knowledge")
          if new_knowledge:
-             plan.last_server_knowledge = str(new_knowledge)
-             
+             plan.last_knowledge_payees = str(new_knowledge)
+
          self.db.commit()
 
     def sync_transactions(self, plan: Plan):
         """Fetches all transactions using delta sync"""
-        server_knowledge = int(plan.last_server_knowledge) if plan.last_server_knowledge else None
+        server_knowledge = int(plan.last_knowledge_transactions) if plan.last_knowledge_transactions else None
         data = self.client.get_transactions(plan.ynab_plan_id, last_knowledge_of_server=server_knowledge)
 
         for txn_data in data.get("transactions", []):
@@ -178,8 +178,8 @@ class SyncService:
                   
         new_knowledge = data.get("server_knowledge")
         if new_knowledge:
-             plan.last_server_knowledge = str(new_knowledge)
-             
+             plan.last_knowledge_transactions = str(new_knowledge)
+
         self.db.commit()
 
     def sync_all(self, plan: Plan):
