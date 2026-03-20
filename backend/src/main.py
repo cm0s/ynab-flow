@@ -278,11 +278,18 @@ def delete_rule(rule_id: str, db: Session = Depends(get_db)):
 
 @app.get("/plans")
 def list_plans(db: Session = Depends(get_db)):
-    """List all synced plans."""
-    plans = db.query(Plan).all()
+    """List all synced plans, ordered by transaction count (most data first)."""
+    from sqlalchemy import func
+    plans = (
+        db.query(Plan, func.count(Transaction.id).label("txn_count"))
+        .outerjoin(Transaction, (Transaction.plan_id == Plan.id) & (Transaction.deleted == False))
+        .group_by(Plan.id)
+        .order_by(func.count(Transaction.id).desc())
+        .all()
+    )
     return [
         {"id": p.id, "name": p.name, "ynab_plan_id": p.ynab_plan_id}
-        for p in plans
+        for p, _ in plans
     ]
 
 

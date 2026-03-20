@@ -13,7 +13,7 @@ class YnabClient:
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json"
         }
-        self.client = httpx.Client(headers=self.headers, base_url=self.base_url)
+        self.client = httpx.Client(headers=self.headers, base_url=self.base_url, timeout=60.0)
 
     def _get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         response = self.client.get(endpoint, params=params)
