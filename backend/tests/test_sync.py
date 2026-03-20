@@ -104,8 +104,8 @@ def test_sync_uses_separate_knowledge_per_entity(service, db):
     # Payees knowledge should be stored separately
     assert plan.last_knowledge_payees == "50"
     assert plan.last_server_knowledge == "100"  # categories unchanged
-    # The request should NOT have sent last_knowledge_of_server (first sync for payees)
-    assert "last_knowledge_of_server" not in str(payees_route.calls[0].request.url)
+    # First sync for payees should send knowledge=0, not the categories value of 100
+    assert "last_knowledge_of_server=0" in str(payees_route.calls[0].request.url)
 
     # 4) Sync transactions — should NOT send knowledge=100 or 50; returns knowledge=75
     txn_route = respx.get("https://api.ynab.com/v1/budgets/budget-1/transactions").mock(
@@ -119,7 +119,8 @@ def test_sync_uses_separate_knowledge_per_entity(service, db):
     assert plan.last_knowledge_transactions == "75"
     assert plan.last_server_knowledge == "100"  # still categories only
     assert plan.last_knowledge_payees == "50"   # still payees only
-    assert "last_knowledge_of_server" not in str(txn_route.calls[0].request.url)
+    # First sync for transactions should send knowledge=0, not 100 or 50
+    assert "last_knowledge_of_server=0" in str(txn_route.calls[0].request.url)
 
     # Verify the transaction was actually stored
     txn = db.query(Transaction).filter(Transaction.ynab_transaction_id == "txn-1").first()
