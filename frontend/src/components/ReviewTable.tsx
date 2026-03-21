@@ -319,7 +319,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   <td className="no-truncate">{row.date}</td>
 
                   {/* Memo */}
-                  <td title={row.original_memo}>
+                  <td className="no-truncate" title={row.original_memo}>
                     {row.merchant_stem || row.cleaned_memo}
                   </td>
 
