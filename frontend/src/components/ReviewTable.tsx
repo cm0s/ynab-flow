@@ -263,9 +263,9 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
             <col style={{ width: 140 }} />  {/* Payee */}
             <col style={{ width: 140 }} />  {/* Category */}
             <col style={{ width: 110 }} />  {/* Source Cat. */}
-            <col style={{ width: 120 }} />  {/* Source */}
+            <col style={{ width: 140 }} />  {/* Source */}
             <col style={{ width: 95 }} />   {/* Conf. */}
-            <col style={{ width: 95 }} />   {/* Status */}
+            <col style={{ width: 110 }} />  {/* Status */}
             <col style={{ width: 110 }} />  {/* Actions */}
           </colgroup>
           <thead>
