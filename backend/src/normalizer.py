@@ -20,6 +20,7 @@ BOILERPLATE_PATTERNS = [
     r"TWINT\s+DU\s+\d[\d/\.\s]*",
     r"TWINT\s+",
     # Common French payment labels
+    r"CREDIT\s+EXPEDITEUR\s+",
     r"ACHAT[/\s]+PRESTATION\s*",
     r"D[ÉE]BIT\s+(DIRECT\s+)?",
     r"VIREMENT\s+(EN[TT]RANT\s+)?",
@@ -42,6 +43,8 @@ BOILERPLATE_PATTERNS = [
     # GMBH, SA, AG, SARL suffixes — kept for stem, stripped from noise later
     # Reference numbers / IDs
     r"\b(REF|NR|NO|ID)\.?\s*:?\s*[A-Z0-9\-]+\b",
+    # Long hex references (unique per transaction, e.g. BF2B0A1C125E4E95A491D7489E5F2641)
+    r"\b[A-F0-9]{16,}\b",
 ]
 
 # Combined regex (case-insensitive, applied on accented-normalized text)
