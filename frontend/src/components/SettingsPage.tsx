@@ -7,9 +7,10 @@ import RulesManager from './RulesManager';
 
 interface Props {
   planId: string;
+  onRuleChanged?: () => void;
 }
 
-export default function SettingsPage({ planId }: Props) {
+export default function SettingsPage({ planId, onRuleChanged }: Props) {
   const queryClient = useQueryClient();
   const [autoApproveThreshold, setAutoApproveThreshold] = useState(95);
   const [reviewThreshold, setReviewThreshold] = useState(75);
@@ -234,7 +235,7 @@ export default function SettingsPage({ planId }: Props) {
       )}
 
       {tab === 'rules' && (
-        <RulesManager planId={planId} categoryGroups={categoryGroups} payees={payees} />
+        <RulesManager planId={planId} categoryGroups={categoryGroups} payees={payees} onRuleChanged={onRuleChanged} />
       )}
     </div>
   );

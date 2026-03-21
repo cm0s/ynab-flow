@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useQuery, useMutation, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
@@ -18,13 +18,33 @@ type View = 'import' | 'review' | 'push' | 'settings' | 'dashboard';
 
 function AppContent() {
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
-  const [predictions, setPredictions] = useState<PredictionRow[]>([]);
-  const [reviewRows, setReviewRows] = useState<ReviewedRow[]>([]);
+  const [predictions, setPredictions] = useState<PredictionRow[]>(() => {
+    try { return JSON.parse(localStorage.getItem('ynab_flow_predictions') || '[]'); } catch { return []; }
+  });
+  const [reviewRows, setReviewRows] = useState<ReviewedRow[]>(() => {
+    try { return JSON.parse(localStorage.getItem('ynab_flow_review_rows') || '[]'); } catch { return []; }
+  });
   const [view, setView] = useState<View>('import');
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [writeMode, setWriteMode] = useState<string>('dry_run');
   const [writeResult, setWriteResult] = useState<WriteBackResponse | null>(null);
   const [ruleToast, setRuleToast] = useState<string | null>(null);
+
+  // Persist import data across reloads
+  useEffect(() => {
+    localStorage.setItem('ynab_flow_predictions', JSON.stringify(predictions));
+  }, [predictions]);
+  useEffect(() => {
+    localStorage.setItem('ynab_flow_review_rows', JSON.stringify(reviewRows));
+  }, [reviewRows]);
+
+  // Clear persisted data when all rows are reviewed (none pending)
+  useEffect(() => {
+    if (reviewRows.length > 0 && reviewRows.every((r) => r.status !== 'pending')) {
+      localStorage.removeItem('ynab_flow_predictions');
+      localStorage.removeItem('ynab_flow_review_rows');
+    }
+  }, [reviewRows]);
 
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: fetchPlans });
 
@@ -463,7 +483,7 @@ function AppContent() {
 
         {/* SETTINGS */}
         {view === 'settings' && (
-          <SettingsPage planId={selectedPlanId} />
+          <SettingsPage planId={selectedPlanId} onRuleChanged={reclassifyRows} />
         )}
 
         {/* DASHBOARD */}
