@@ -434,7 +434,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                           onClick={() => setEditingRow(null)}
                           title="Done editing"
                         >
-                          <Check size={14} color="var(--success)" />
+                          <CheckCheck size={14} color="var(--accent)" />
                         </button>
                       ) : (
                         <button
