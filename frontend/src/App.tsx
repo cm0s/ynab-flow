@@ -4,7 +4,7 @@ import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
   CheckCircle, AlertCircle, XCircle, Settings, BarChart3,
 } from 'lucide-react';
-import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, writeBack, createRule } from './api/client';
+import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, writeBack, createRule, reclassify } from './api/client';
 import type { Plan, PredictionRow, Account, CategoryGroup, WriteBackResponse } from './api/client';
 import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
@@ -115,6 +115,34 @@ function AppContent() {
     });
   }, []);
 
+  /* ---- Re-classify current rows through the pipeline ---- */
+  const reclassifyRows = useCallback(async () => {
+    if (!selectedPlanId || reviewRows.length === 0) return;
+    const txns = reviewRows.map((r) => ({
+      date: r.date,
+      memo: r.original_memo,
+      amount: r.amount,
+      label: r.label,
+      source_category: r.source_category,
+    }));
+    const result = await reclassify(selectedPlanId, txns);
+    setPredictions(result.predictions);
+    setReviewRows((prev) => {
+      const updated = toReviewedRows(result.predictions);
+      // Preserve user edits: if a row was manually edited, keep that status/payee/category
+      return updated.map((newRow, i) => {
+        const old = prev[i];
+        if (!old) return newRow;
+        // Keep user overrides if they manually accepted/ignored or edited fields
+        if (old.status === 'ignored') return { ...newRow, status: 'ignored' };
+        if (old.editedPayee !== (old.payee || '') || old.editedCategory !== (old.category || '')) {
+          return { ...newRow, status: old.status, editedPayee: old.editedPayee, editedCategory: old.editedCategory };
+        }
+        return newRow;
+      });
+    });
+  }, [selectedPlanId, reviewRows]);
+
   /* ---- Create rule from correction (FR-12) ---- */
   const handleCreateRule = useCallback(async (row: ReviewedRow) => {
     if (!selectedPlanId || !row.editedPayee) return;
@@ -128,13 +156,15 @@ function AppContent() {
         assign_category: row.editedCategory || undefined,
       });
       queryClient.invalidateQueries({ queryKey: ['rules', selectedPlanId] });
-      setRuleToast(`Rule created: "${row.merchant_stem}" → ${row.editedPayee}`);
+      // Re-classify all rows so the new rule takes effect immediately
+      await reclassifyRows();
+      setRuleToast(`Rule created & applied: "${row.merchant_stem}" → ${row.editedPayee}`);
       setTimeout(() => setRuleToast(null), 3000);
     } catch (e) {
       setRuleToast(`Error: ${(e as Error).message}`);
       setTimeout(() => setRuleToast(null), 3000);
     }
-  }, [selectedPlanId]);
+  }, [selectedPlanId, reclassifyRows]);
 
   /* ---- Export CSV ---- */
   const handleExport = () => {

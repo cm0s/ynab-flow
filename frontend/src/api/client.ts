@@ -71,6 +71,17 @@ export const syncPlanData = (planId: string, full = false) =>
 export const trainModels = (planId: string) =>
   request<{ status: string }>(`/train?plan_id=${planId}`, { method: 'POST' });
 
+/* ---- Reclassify ---- */
+export function reclassify(
+  planId: string,
+  transactions: { date: string; memo: string; amount: number; label: string; source_category: string }[],
+): Promise<UploadResult> {
+  return request<UploadResult>('/reclassify', {
+    method: 'POST',
+    body: JSON.stringify({ plan_id: planId, transactions }),
+  });
+}
+
 /* ---- Accounts ---- */
 export interface Account {
   id: string;

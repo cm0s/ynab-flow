@@ -249,6 +249,37 @@ async def upload_csv(
     return {"count": len(results), "predictions": [asdict(r) for r in results]}
 
 
+class ReclassifyItem(BaseModel):
+    date: str
+    memo: str
+    amount: float
+    label: str = ""
+    source_category: str = ""
+
+class ReclassifyRequest(BaseModel):
+    plan_id: str
+    transactions: List[ReclassifyItem]
+
+@app.post("/reclassify")
+def reclassify(req: ReclassifyRequest, db: Session = Depends(get_db)):
+    """Re-run classification on previously imported transactions."""
+    plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+
+    csv_txns = [
+        CSVTransaction(
+            date=t.date, memo=t.memo,
+            inflow=t.amount if t.amount >= 0 else None,
+            outflow=-t.amount if t.amount < 0 else None,
+            label=t.label, source_category=t.source_category,
+        )
+        for t in req.transactions
+    ]
+    results = bulk_predict(db, req.plan_id, csv_txns)
+    return {"count": len(results), "predictions": [asdict(r) for r in results]}
+
+
 @app.put("/rules/{rule_id}")
 def update_rule(rule_id: str, req: RuleCreate, db: Session = Depends(get_db)):
     """Update an existing rule."""
