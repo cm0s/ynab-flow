@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback } from 'react';
-import type { PredictionRow, CategoryGroup } from '../api/client';
-import { CategoryPicker } from './SearchablePicker';
+import type { PredictionRow, CategoryGroup, PayeeItem } from '../api/client';
+import { CategoryPicker, PayeePicker } from './SearchablePicker';
 import {
   CheckCircle, AlertTriangle, HelpCircle, Zap, Clock, Brain,
   Check, X, Eye, EyeOff, Filter, CheckCheck, Pencil, Search,
@@ -72,6 +72,7 @@ function formatAmount(amount: number) {
 interface Props {
   rows: ReviewedRow[];
   categoryGroups: CategoryGroup[];
+  payees: PayeeItem[];
   onUpdateRow: (index: number, update: Partial<ReviewedRow>) => void;
   onBulkAction: (indices: number[], status: ReviewStatus) => void;
   onCreateRule?: (row: ReviewedRow) => void;
@@ -81,7 +82,7 @@ interface Props {
 type SortKey = 'date' | 'memo' | 'amount' | 'payee' | 'category' | 'source_category' | 'source' | 'confidence' | 'status';
 type SortDir = 'asc' | 'desc';
 
-export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkAction, onCreateRule, changedRows }: Props) {
+export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow, onBulkAction, onCreateRule, changedRows }: Props) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -343,14 +344,10 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   {/* Payee — editable */}
                   <td className="no-truncate">
                     {isEditing ? (
-                      <input
+                      <PayeePicker
                         value={row.editedPayee}
-                        onChange={(e) => onUpdateRow(originalIndex, { editedPayee: e.target.value })}
-                        style={{
-                          width: '100%', padding: '4px 6px', background: 'var(--bg-secondary)',
-                          border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)',
-                          color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: '0.8rem',
-                        }}
+                        items={payees}
+                        onChange={(name) => onUpdateRow(originalIndex, { editedPayee: name })}
                       />
                     ) : (
                       <span style={{ color: row.editedPayee ? 'var(--text-primary)' : 'var(--text-muted)' }}>
