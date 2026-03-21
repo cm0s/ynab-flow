@@ -403,8 +403,8 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </td>
 
                   {/* Actions */}
-                  <td style={{ overflow: 'visible' }}>
-                    <div style={{ display: 'flex', gap: 4 }}>
+                  <td>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>
                       {onCreateRule && row.editedPayee && (
                         <button
                           className="btn btn-ghost"
