@@ -68,6 +68,50 @@ def test_exact_match(db):
     assert result.category == "Groceries"
 
 
+def test_fuzzy_match(db):
+    """A similar but not identical memo should yield a fuzzy match."""
+    plan = _seed(db)
+    matcher = HistoricalMatcher(db, plan.id)
+    # Slightly different memo — same merchant, different location
+    result = matcher.match(
+        normalized_memo="MIGROS GENEVE",
+        merchant_stem="MIGROS GENEVE",
+        amount=-30.0,
+    )
+    assert result is not None
+    assert result.source_type == "fuzzy"
+    assert result.payee == "Migros"
+    assert result.category == "Groceries"
+    assert 0.6 <= result.confidence < 1.0
+
+
+def test_fuzzy_match_frequency_boost(db):
+    """Multiple similar historical transactions should produce higher confidence."""
+    plan = _seed(db)
+    # Add more Migros transactions with slight variations
+    acct = db.query(Account).first()
+    payee = db.query(Payee).first()
+    cat = db.query(Category).first()
+    for i, city in enumerate(["BERN", "ZURICH", "BASEL"]):
+        txn = Transaction(
+            plan_id=plan.id, account_id=acct.id, payee_id=payee.id, category_id=cat.id,
+            ynab_transaction_id=f"t-extra-{i}", date="2025-02-01", amount=-25.0,
+            memo=f"ACHAT/PRESTATION TWINT DU 01.02.2025 MIGROS {city} (CH)",
+        )
+        db.add(txn)
+    db.commit()
+
+    matcher = HistoricalMatcher(db, plan.id)
+    result = matcher.match(
+        normalized_memo="MIGROS FRIBOURG",
+        merchant_stem="MIGROS FRIBOURG",
+        amount=-20.0,
+    )
+    assert result is not None
+    assert result.source_type == "fuzzy"
+    assert result.payee == "Migros"
+
+
 def test_no_match(db):
     plan = _seed(db)
     matcher = HistoricalMatcher(db, plan.id)
