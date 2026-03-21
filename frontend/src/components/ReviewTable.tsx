@@ -251,9 +251,9 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
             <col style={{ width: 140 }} />  {/* Payee */}
             <col style={{ width: 140 }} />  {/* Category */}
             <col style={{ width: 110 }} />  {/* Source Cat. */}
-            <col style={{ width: 105 }} />  {/* Source */}
-            <col style={{ width: 90 }} />   {/* Conf. */}
-            <col style={{ width: 90 }} />   {/* Status */}
+            <col style={{ width: 120 }} />  {/* Source */}
+            <col style={{ width: 95 }} />   {/* Conf. */}
+            <col style={{ width: 95 }} />   {/* Status */}
             <col style={{ width: 110 }} />  {/* Actions */}
           </colgroup>
           <thead>
@@ -368,14 +368,14 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </td>
 
                   {/* Source badge */}
-                  <td>
+                  <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>
                     <span className={`badge ${sourceBadge(row.source)}`}>
                       {sourceIcon(row.source)} {row.source.replace('_', ' ')}
                     </span>
                   </td>
 
                   {/* Confidence */}
-                  <td>
+                  <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <div className="confidence-bar">
                         <div
@@ -390,7 +390,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </td>
 
                   {/* Status */}
-                  <td>
+                  <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>
                     {row.status === 'accepted' && (
                       <span className="badge badge-success"><Check size={12} /> Accepted</span>
                     )}
