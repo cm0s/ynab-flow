@@ -14,7 +14,7 @@ from src.normalizer import normalize
 from src.rule_engine import RuleEngine
 from src.orchestrator import Orchestrator
 from src.ml_classifier import MLClassifier
-from src.csv_service import parse_csv, bulk_predict
+from src.csv_service import CSVTransaction, parse_csv, bulk_predict
 from src.write_back_service import WriteBackService, WriteTransaction
 from src.transfer_detector import detect_transfer
 from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction
