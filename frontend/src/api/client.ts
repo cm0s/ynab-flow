@@ -190,6 +190,21 @@ export function createRule(rule: {
   });
 }
 
+export function updateRule(ruleId: string, rule: {
+  plan_id: string;
+  name: string;
+  priority?: number;
+  match_type: string;
+  pattern: string;
+  assign_payee?: string;
+  assign_category?: string;
+}) {
+  return request<{ status: string; rule_id: string }>(`/rules/${ruleId}`, {
+    method: 'PUT',
+    body: JSON.stringify({ priority: 0, flag_review: false, flag_ignore: false, ...rule }),
+  });
+}
+
 export function deleteRule(ruleId: string) {
   return request<{ status: string }>(`/rules/${ruleId}`, { method: 'DELETE' });
 }
