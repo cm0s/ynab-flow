@@ -240,6 +240,10 @@ h3 { font-size: 1.125rem; }
   margin: 0 auto;
 }
 
+.app-main.full-width {
+  max-width: 100%;
+}
+
 /* ---- Select ---- */
 .select-wrapper {
   position: relative;
@@ -274,11 +278,12 @@ h3 { font-size: 1.125rem; }
   width: 100%;
   border-collapse: collapse;
   font-size: 0.85rem;
+  table-layout: fixed;
 }
 
 .results-table th {
   text-align: left;
-  padding: 12px 16px;
+  padding: 8px 10px;
   font-weight: 500;
   color: var(--text-muted);
   font-size: 0.75rem;
@@ -289,13 +294,26 @@ h3 { font-size: 1.125rem; }
   top: 0;
   background: var(--bg-card);
   z-index: 10;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .results-table td {
-  padding: 12px 16px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   color: var(--text-secondary);
   vertical-align: middle;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.results-table td.no-truncate {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .results-table tr:hover td {

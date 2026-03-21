@@ -241,11 +241,24 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
       </div>
 
       {/* ---- Table ---- */}
-      <div className="card" style={{ overflow: 'auto', maxHeight: '65vh' }}>
+      <div className="card" style={{ overflowY: 'auto', maxHeight: '65vh' }}>
         <table className="results-table">
+          <colgroup>
+            <col style={{ width: 36 }} />
+            <col style={{ width: 80 }} />   {/* Date */}
+            <col />                         {/* Memo — takes remaining space */}
+            <col style={{ width: 75 }} />   {/* Amount */}
+            <col style={{ width: 140 }} />  {/* Payee */}
+            <col style={{ width: 140 }} />  {/* Category */}
+            <col style={{ width: 110 }} />  {/* Source Cat. */}
+            <col style={{ width: 105 }} />  {/* Source */}
+            <col style={{ width: 90 }} />   {/* Conf. */}
+            <col style={{ width: 90 }} />   {/* Status */}
+            <col style={{ width: 110 }} />  {/* Actions */}
+          </colgroup>
           <thead>
             <tr>
-              <th style={{ width: 36 }}>
+              <th>
                 <input
                   type="checkbox"
                   checked={selected.size === filtered.length && filtered.length > 0}
@@ -267,7 +280,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                 <th
                   key={key}
                   onClick={() => toggleSort(key)}
-                  style={{ cursor: 'pointer', userSelect: 'none', whiteSpace: 'nowrap' }}
+                  style={{ cursor: 'pointer', userSelect: 'none' }}
                 >
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                     {label}
@@ -277,7 +290,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </span>
                 </th>
               ))}
-              <th style={{ width: 100 }}>Actions</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -303,28 +316,26 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </td>
 
                   {/* Date */}
-                  <td style={{ whiteSpace: 'nowrap' }}>{row.date}</td>
+                  <td className="no-truncate">{row.date}</td>
 
                   {/* Memo */}
                   <td title={row.original_memo}>
-                    <div style={{ maxWidth: 250, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {row.merchant_stem || row.cleaned_memo}
-                    </div>
+                    {row.merchant_stem || row.cleaned_memo}
                   </td>
 
                   {/* Amount */}
-                  <td className={`amount ${row.amount >= 0 ? 'positive' : 'negative'}`}>
+                  <td className={`amount ${row.amount >= 0 ? 'positive' : 'negative'}`} style={{ whiteSpace: 'nowrap', overflow: 'visible', textOverflow: 'clip' }}>
                     {formatAmount(row.amount)}
                   </td>
 
                   {/* Payee — editable */}
-                  <td>
+                  <td className="no-truncate">
                     {isEditing ? (
                       <input
                         value={row.editedPayee}
                         onChange={(e) => onUpdateRow(originalIndex, { editedPayee: e.target.value })}
                         style={{
-                          width: 120, padding: '4px 6px', background: 'var(--bg-secondary)',
+                          width: '100%', padding: '4px 6px', background: 'var(--bg-secondary)',
                           border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)',
                           color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: '0.8rem',
                         }}
@@ -337,7 +348,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </td>
 
                   {/* Category — editable (select from existing) */}
-                  <td>
+                  <td className="no-truncate">
                     {isEditing ? (
                       <CategoryPicker
                         value={row.editedCategory}
@@ -392,7 +403,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </td>
 
                   {/* Actions */}
-                  <td>
+                  <td style={{ overflow: 'visible' }}>
                     <div style={{ display: 'flex', gap: 4 }}>
                       {onCreateRule && row.editedPayee && (
                         <button
