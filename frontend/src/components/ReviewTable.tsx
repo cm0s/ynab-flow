@@ -49,6 +49,17 @@ const sourceBadge = (source: string) => {
   return map[source] || 'badge-danger';
 };
 
+const sourceTooltip = (source: string) => {
+  const tips: Record<string, string> = {
+    rule: 'Matched by a user-defined deterministic rule (confidence 1.0)',
+    exact_history: 'Exact match found in historical YNAB transactions',
+    fuzzy_history: 'Similar match found in historical transactions using fuzzy text matching',
+    ml: 'Predicted by the machine-learning classifier (TF-IDF + Logistic Regression)',
+    unclassified: 'No match found — requires manual classification',
+  };
+  return tips[source] || 'Unknown classification source';
+};
+
 const confLevel = (c: number) =>
   c >= 0.95 ? 'high' : c >= 0.75 ? 'medium' : 'low';
 
@@ -369,7 +380,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
 
                   {/* Source badge */}
                   <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>
-                    <span className={`badge ${sourceBadge(row.source)}`}>
+                    <span className={`badge ${sourceBadge(row.source)}`} title={sourceTooltip(row.source)}>
                       {sourceIcon(row.source)} {row.source.replace('_', ' ')}
                     </span>
                   </td>
