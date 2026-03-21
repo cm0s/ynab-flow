@@ -7,8 +7,8 @@ for new transactions before falling back to ML.
 
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Optional, List, Tuple
-from collections import Counter
+from typing import Optional, List, Tuple, Dict
+from collections import Counter, defaultdict
 from sqlalchemy.orm import Session
 from src.models import Transaction, Payee, Category
 from src.normalizer import normalize
@@ -22,15 +22,91 @@ class HistoricalMatch:
     source_type: str           # "exact" | "fuzzy"
 
 
+@dataclass
+class _CachedTxn:
+    """Pre-computed data for a historical transaction."""
+    cleaned_memo: str
+    merchant_stem: str
+    amount: float
+    account_id: str
+    payee_name: Optional[str]
+    category_name: Optional[str]
+    # Pre-computed for fast fuzzy filtering
+    memo_trigrams: frozenset
+
+
+def _trigrams(s: str) -> frozenset:
+    """Extract character trigrams for cheap similarity pre-filtering."""
+    s = s.upper()
+    if len(s) < 3:
+        return frozenset([s])
+    return frozenset(s[i:i+3] for i in range(len(s) - 2))
+
+
 class HistoricalMatcher:
     """
     Searches previously classified YNAB transactions for matches.
     Exact matches are tried first (FR-5.1), then fuzzy (FR-5.2–5.4).
+
+    Pre-computes normalized memos and resolved names at init time
+    so that repeated calls to match() are fast.
     """
 
     def __init__(self, db: Session, plan_id: str):
         self.db = db
         self.plan_id = plan_id
+        self._cache: List[_CachedTxn] = []
+        # Exact match lookup: upper(cleaned_memo) -> list of (payee, category) pairs
+        self._exact_index: Dict[str, List[Tuple[Optional[str], Optional[str]]]] = defaultdict(list)
+        self._build_cache()
+
+    def _build_cache(self):
+        """Load all historical transactions once and pre-compute normalized memos."""
+        txns = (
+            self.db.query(Transaction)
+            .filter(
+                Transaction.plan_id == self.plan_id,
+                Transaction.deleted == False,
+                Transaction.memo.isnot(None),
+            )
+            .all()
+        )
+
+        # Batch-resolve payee and category names
+        payee_ids = {t.payee_id for t in txns if t.payee_id}
+        cat_ids = {t.category_id for t in txns if t.category_id}
+
+        payee_map = {}
+        if payee_ids:
+            for p in self.db.query(Payee).filter(Payee.id.in_(payee_ids)).all():
+                payee_map[p.id] = p.name
+
+        cat_map = {}
+        if cat_ids:
+            for c in self.db.query(Category).filter(Category.id.in_(cat_ids)).all():
+                cat_map[c.id] = c.name
+
+        for txn in txns:
+            payee_name = payee_map.get(txn.payee_id)
+            cat_name = cat_map.get(txn.category_id)
+            if not payee_name and not cat_name:
+                continue
+            norm = normalize(txn.memo or "")
+            memo_upper = norm.cleaned_memo.upper()
+
+            # Build exact index
+            self._exact_index[memo_upper].append((payee_name, cat_name))
+
+            # Build fuzzy cache
+            self._cache.append(_CachedTxn(
+                cleaned_memo=norm.cleaned_memo,
+                merchant_stem=norm.merchant_stem,
+                amount=txn.amount or 0,
+                account_id=txn.account_id or "",
+                payee_name=payee_name,
+                category_name=cat_name,
+                memo_trigrams=_trigrams(norm.cleaned_memo),
+            ))
 
     def match(
         self,
@@ -52,27 +128,9 @@ class HistoricalMatcher:
     def _exact_match(self, normalized_memo: str) -> Optional[HistoricalMatch]:
         """
         Find transactions whose memo normalizes to exactly the same string.
-        Pick the most common payee/category pair.
+        Pick the most common payee/category pair. O(1) lookup.
         """
-        txns = (
-            self.db.query(Transaction)
-            .filter(
-                Transaction.plan_id == self.plan_id,
-                Transaction.deleted == False,
-                Transaction.memo.isnot(None),
-            )
-            .all()
-        )
-
-        matches: List[Tuple[Optional[str], Optional[str]]] = []
-        for txn in txns:
-            norm = normalize(txn.memo or "")
-            if norm.cleaned_memo.upper() == normalized_memo.upper():
-                payee_name = self._resolve_payee(txn.payee_id)
-                cat_name = self._resolve_category(txn.category_id)
-                if payee_name or cat_name:
-                    matches.append((payee_name, cat_name))
-
+        matches = self._exact_index.get(normalized_memo.upper())
         if not matches:
             return None
 
@@ -102,38 +160,33 @@ class HistoricalMatcher:
     ) -> Optional[HistoricalMatch]:
         """
         Score historical transactions by weighted similarity.
-        Features: memo similarity, stem similarity, amount sign, amount bucket, account.
+        Uses trigram pre-filtering to avoid expensive SequenceMatcher on
+        clearly dissimilar entries.
         """
-        txns = (
-            self.db.query(Transaction)
-            .filter(
-                Transaction.plan_id == self.plan_id,
-                Transaction.deleted == False,
-                Transaction.memo.isnot(None),
-            )
-            .all()
-        )
+        query_trigrams = _trigrams(normalized_memo)
+        min_overlap = max(1, len(query_trigrams) // 5)  # At least 20% trigram overlap
 
-        scored: List[Tuple[float, str, Optional[str], Optional[str]]] = []
+        scored: List[Tuple[float, Optional[str], Optional[str]]] = []
 
-        for txn in txns:
-            norm = normalize(txn.memo or "")
+        for ct in self._cache:
+            # Cheap trigram pre-filter: skip if too few trigrams in common
+            overlap = len(query_trigrams & ct.memo_trigrams)
+            if overlap < min_overlap:
+                continue
+
             score = self._similarity_score(
                 normalized_memo, merchant_stem, amount, account_id,
-                norm.cleaned_memo, norm.merchant_stem, txn.amount or 0, txn.account_id or "",
+                ct.cleaned_memo, ct.merchant_stem, ct.amount, ct.account_id,
             )
             if score >= 0.6:  # Minimum similarity threshold
-                payee_name = self._resolve_payee(txn.payee_id)
-                cat_name = self._resolve_category(txn.category_id)
-                if payee_name or cat_name:
-                    scored.append((score, txn.id, payee_name, cat_name))
+                scored.append((score, ct.payee_name, ct.category_name))
 
         if not scored:
             return None
 
         # Sort by score descending and pick best
         scored.sort(key=lambda x: x[0], reverse=True)
-        best_score, _, best_payee, best_cat = scored[0]
+        best_score, best_payee, best_cat = scored[0]
 
         return HistoricalMatch(
             payee=best_payee,
@@ -176,19 +229,3 @@ class HistoricalMatcher:
             + 0.1 * bucket_match
             + 0.1 * account_match
         )
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _resolve_payee(self, payee_id: Optional[str]) -> Optional[str]:
-        if not payee_id:
-            return None
-        payee = self.db.query(Payee).filter(Payee.id == payee_id).first()
-        return payee.name if payee else None
-
-    def _resolve_category(self, category_id: Optional[str]) -> Optional[str]:
-        if not category_id:
-            return None
-        cat = self.db.query(Category).filter(Category.id == category_id).first()
-        return cat.name if cat else None
