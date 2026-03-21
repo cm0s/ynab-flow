@@ -2,13 +2,16 @@ import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Trash2, Plus, Zap, Shield } from 'lucide-react';
 import { fetchRules, createRule, deleteRule } from '../api/client';
-import type { Rule } from '../api/client';
+import type { Rule, CategoryGroup, PayeeItem } from '../api/client';
+import { CategoryPicker, PayeePicker } from './SearchablePicker';
 
 interface Props {
   planId: string;
+  categoryGroups: CategoryGroup[];
+  payees: PayeeItem[];
 }
 
-export default function RulesManager({ planId }: Props) {
+export default function RulesManager({ planId, categoryGroups, payees }: Props) {
   const queryClient = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
   const [newRule, setNewRule] = useState({
@@ -85,11 +88,21 @@ export default function RulesManager({ planId }: Props) {
             </div>
             <div>
               <label style={{ display: 'block', marginBottom: 4, fontSize: '0.8rem', color: 'var(--text-muted)' }}>Assign Payee</label>
-              <input style={inputStyle} value={newRule.assign_payee} onChange={(e) => setNewRule({ ...newRule, assign_payee: e.target.value })} placeholder="Migros" />
+              <PayeePicker
+                value={newRule.assign_payee}
+                items={payees}
+                onChange={(name) => setNewRule({ ...newRule, assign_payee: name })}
+                inputStyle={inputStyle}
+              />
             </div>
             <div style={{ gridColumn: 'span 2' }}>
               <label style={{ display: 'block', marginBottom: 4, fontSize: '0.8rem', color: 'var(--text-muted)' }}>Assign Category</label>
-              <input style={inputStyle} value={newRule.assign_category} onChange={(e) => setNewRule({ ...newRule, assign_category: e.target.value })} placeholder="Groceries" />
+              <CategoryPicker
+                value={newRule.assign_category}
+                groups={categoryGroups}
+                onChange={(name) => setNewRule({ ...newRule, assign_category: name })}
+                inputStyle={inputStyle}
+              />
             </div>
           </div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
