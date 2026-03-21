@@ -48,11 +48,15 @@ def test_rule_takes_precedence(db):
     assert result.confidence == 1.0
 
 
-def test_unclassified_fallback(db):
+def test_unclassified_fallback(db, monkeypatch):
     """When nothing matches, source should be unclassified."""
     plan = Plan(ynab_plan_id="b2", name="Empty Budget")
     db.add(plan)
     db.commit()
+
+    # Ensure the ML classifier doesn't interfere by returning an empty prediction
+    from src.ml_classifier import MLClassifier, MLPrediction
+    monkeypatch.setattr(MLClassifier, "predict", lambda self, memo: MLPrediction())
 
     orch = Orchestrator(db, plan.id)
     result = orch.predict(memo="UNKNOWN TRANSACTION XYZ", amount=-10.0)
