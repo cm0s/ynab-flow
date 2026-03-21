@@ -275,7 +275,7 @@ function AppContent() {
       )}
 
       {/* ---- Main ---- */}
-      <main className="app-main">
+      <main className={`app-main${view === 'review' ? ' full-width' : ''}`}>
         {/* IMPORT */}
         {view === 'import' && (
           <>
