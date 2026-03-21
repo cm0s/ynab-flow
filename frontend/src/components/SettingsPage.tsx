@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Settings as SettingsIcon, Key, Gauge, Shield, RefreshCw, Loader2, Brain, Database } from 'lucide-react';
-import { syncBudgets, syncPlanData, trainModels } from '../api/client';
+import { syncBudgets, syncPlanData, trainModels, fetchCategories, fetchPayees } from '../api/client';
+import type { CategoryGroup, PayeeItem } from '../api/client';
 import RulesManager from './RulesManager';
 
 interface Props {
@@ -13,6 +14,19 @@ export default function SettingsPage({ planId }: Props) {
   const [autoApproveThreshold, setAutoApproveThreshold] = useState(95);
   const [reviewThreshold, setReviewThreshold] = useState(75);
   const [tab, setTab] = useState<'general' | 'rules'>('general');
+
+  const categoriesQuery = useQuery({
+    queryKey: ['categories', planId],
+    queryFn: () => fetchCategories(planId),
+    enabled: !!planId,
+  });
+  const payeesQuery = useQuery({
+    queryKey: ['payees', planId],
+    queryFn: () => fetchPayees(planId),
+    enabled: !!planId,
+  });
+  const categoryGroups: CategoryGroup[] = categoriesQuery.data || [];
+  const payees: PayeeItem[] = payeesQuery.data || [];
 
   const syncMutation = useMutation({
     mutationFn: syncBudgets,
@@ -220,7 +234,7 @@ export default function SettingsPage({ planId }: Props) {
       )}
 
       {tab === 'rules' && (
-        <RulesManager planId={planId} />
+        <RulesManager planId={planId} categoryGroups={categoryGroups} payees={payees} />
       )}
     </div>
   );

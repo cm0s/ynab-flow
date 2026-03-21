@@ -92,6 +92,15 @@ export interface CategoryGroup {
 export const fetchCategories = (planId: string) =>
   request<CategoryGroup[]>(`/plans/${planId}/categories`);
 
+/* ---- Payees ---- */
+export interface PayeeItem {
+  id: string;
+  name: string;
+}
+
+export const fetchPayees = (planId: string) =>
+  request<PayeeItem[]>(`/plans/${planId}/payees`);
+
 /* ---- Write-Back ---- */
 export interface WriteBackTransaction {
   date: string;
