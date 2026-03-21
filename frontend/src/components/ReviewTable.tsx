@@ -247,7 +247,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
             <col style={{ width: 36 }} />
             <col style={{ width: 80 }} />   {/* Date */}
             <col />                         {/* Memo — takes remaining space */}
-            <col style={{ width: 75 }} />   {/* Amount */}
+            <col style={{ width: 95 }} />   {/* Amount */}
             <col style={{ width: 140 }} />  {/* Payee */}
             <col style={{ width: 140 }} />  {/* Category */}
             <col style={{ width: 110 }} />  {/* Source Cat. */}
@@ -324,7 +324,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </td>
 
                   {/* Amount */}
-                  <td className={`amount ${row.amount >= 0 ? 'positive' : 'negative'}`} style={{ whiteSpace: 'nowrap', overflow: 'visible', textOverflow: 'clip' }}>
+                  <td className={`amount ${row.amount >= 0 ? 'positive' : 'negative'}`} style={{ whiteSpace: 'nowrap', textOverflow: 'clip', textAlign: 'right' }}>
                     {formatAmount(row.amount)}
                   </td>
 
