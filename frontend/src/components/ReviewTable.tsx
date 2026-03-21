@@ -245,7 +245,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
         <table className="results-table">
           <colgroup>
             <col style={{ width: 36 }} />
-            <col style={{ width: 80 }} />   {/* Date */}
+            <col style={{ width: 95 }} />   {/* Date */}
             <col />                         {/* Memo — takes remaining space */}
             <col style={{ width: 95 }} />   {/* Amount */}
             <col style={{ width: 140 }} />  {/* Payee */}
@@ -316,7 +316,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
                   </td>
 
                   {/* Date */}
-                  <td className="no-truncate">{row.date}</td>
+                  <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>{row.date}</td>
 
                   {/* Memo */}
                   <td className="no-truncate" title={row.original_memo}>
