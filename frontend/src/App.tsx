@@ -29,6 +29,8 @@ function AppContent() {
   const [writeMode, setWriteMode] = useState<string>('dry_run');
   const [writeResult, setWriteResult] = useState<WriteBackResponse | null>(null);
   const [ruleToast, setRuleToast] = useState<string | null>(null);
+  const [isReclassifying, setIsReclassifying] = useState(false);
+  const [changedRows, setChangedRows] = useState<Set<number>>(new Set());
 
   // Persist import data across reloads
   useEffect(() => {
@@ -138,29 +140,47 @@ function AppContent() {
   /* ---- Re-classify current rows through the pipeline ---- */
   const reclassifyRows = useCallback(async () => {
     if (!selectedPlanId || reviewRows.length === 0) return;
-    const txns = reviewRows.map((r) => ({
-      date: r.date,
-      memo: r.original_memo,
-      amount: r.amount,
-      label: r.label,
-      source_category: r.source_category,
-    }));
-    const result = await reclassify(selectedPlanId, txns);
-    setPredictions(result.predictions);
-    setReviewRows((prev) => {
-      const updated = toReviewedRows(result.predictions);
-      // Preserve user edits: if a row was manually edited, keep that status/payee/category
-      return updated.map((newRow, i) => {
-        const old = prev[i];
-        if (!old) return newRow;
-        // Keep user overrides if they manually accepted/ignored or edited fields
-        if (old.status === 'ignored') return { ...newRow, status: 'ignored' };
-        if (old.editedPayee !== (old.payee || '') || old.editedCategory !== (old.category || '')) {
-          return { ...newRow, status: old.status, editedPayee: old.editedPayee, editedCategory: old.editedCategory };
+    setIsReclassifying(true);
+    try {
+      const txns = reviewRows.map((r) => ({
+        date: r.date,
+        memo: r.original_memo,
+        amount: r.amount,
+        label: r.label,
+        source_category: r.source_category,
+      }));
+      const result = await reclassify(selectedPlanId, txns);
+      setPredictions(result.predictions);
+      setReviewRows((prev) => {
+        const updated = toReviewedRows(result.predictions);
+        const changed = new Set<number>();
+        const merged = updated.map((newRow, i) => {
+          const old = prev[i];
+          if (!old) return newRow;
+          // Track rows where classification changed
+          if (old.payee !== newRow.payee || old.category !== newRow.category || old.source !== newRow.source) {
+            changed.add(newRow.row_index);
+          }
+          // Keep user overrides if they manually accepted/ignored or edited fields
+          if (old.status === 'ignored') return { ...newRow, status: 'ignored' as const };
+          if (old.editedPayee !== (old.payee || '') || old.editedCategory !== (old.category || '')) {
+            return { ...newRow, status: old.status, editedPayee: old.editedPayee, editedCategory: old.editedCategory };
+          }
+          return newRow;
+        });
+        // Set changed rows for highlighting (clear after animation)
+        if (changed.size > 0) {
+          setChangedRows(changed);
+          setTimeout(() => setChangedRows(new Set()), 3000);
         }
-        return newRow;
+        return merged;
       });
-    });
+      const count = reviewRows.length;
+      setRuleToast(`Reclassification complete — ${count} transactions re-evaluated`);
+      setTimeout(() => setRuleToast(null), 2000);
+    } finally {
+      setIsReclassifying(false);
+    }
   }, [selectedPlanId, reviewRows]);
 
   /* ---- Create rule from correction (FR-12) ---- */
@@ -282,15 +302,20 @@ function AppContent() {
       </header>
 
       {/* ---- Toast ---- */}
-      {ruleToast && (
+      {(isReclassifying || ruleToast) && (
         <div style={{
           position: 'fixed', bottom: 24, right: 24, zIndex: 1000,
           background: 'var(--bg-card)', border: '1px solid var(--accent)',
           borderRadius: 'var(--radius-md)', padding: '12px 20px',
           boxShadow: 'var(--shadow-glow)', color: 'var(--text-primary)',
           fontSize: '0.875rem', animation: 'fadeInUp 0.3s ease',
+          display: 'flex', alignItems: 'center', gap: 8,
         }}>
-          {ruleToast}
+          {isReclassifying ? (
+            <><Loader2 size={16} className="loading-pulse" /> Reclassifying transactions…</>
+          ) : (
+            <><CheckCircle size={16} style={{ color: 'var(--success)' }} /> {ruleToast}</>
+          )}
         </div>
       )}
 
@@ -349,6 +374,7 @@ function AppContent() {
               onUpdateRow={handleUpdateRow}
               onBulkAction={handleBulkAction}
               onCreateRule={handleCreateRule}
+              changedRows={changedRows}
             />
           </section>
         )}

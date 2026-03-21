@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Trash2, Plus, Zap, Shield, Pencil, Check, X } from 'lucide-react';
+import { Trash2, Plus, Zap, Shield, Pencil, X } from 'lucide-react';
 import { fetchRules, createRule, updateRule, deleteRule } from '../api/client';
 import type { Rule, CategoryGroup, PayeeItem } from '../api/client';
 import { CategoryPicker, PayeePicker } from './SearchablePicker';

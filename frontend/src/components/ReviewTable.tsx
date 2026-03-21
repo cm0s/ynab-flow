@@ -75,12 +75,13 @@ interface Props {
   onUpdateRow: (index: number, update: Partial<ReviewedRow>) => void;
   onBulkAction: (indices: number[], status: ReviewStatus) => void;
   onCreateRule?: (row: ReviewedRow) => void;
+  changedRows?: Set<number>;
 }
 
 type SortKey = 'date' | 'memo' | 'amount' | 'payee' | 'category' | 'source_category' | 'source' | 'confidence' | 'status';
 type SortDir = 'asc' | 'desc';
 
-export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkAction, onCreateRule }: Props) {
+export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkAction, onCreateRule, changedRows }: Props) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -310,7 +311,7 @@ export default function ReviewTable({ rows, categoryGroups, onUpdateRow, onBulkA
               return (
                 <tr
                   key={originalIndex}
-                  className="animate-in"
+                  className={`animate-in${changedRows?.has(row.row_index) ? ' row-changed' : ''}`}
                   style={{
                     opacity: row.status === 'ignored' ? 0.4 : 1,
                     animationDelay: `${(originalIndex % 30) * 15}ms`,

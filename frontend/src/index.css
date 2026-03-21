@@ -358,6 +358,15 @@ h3 { font-size: 1.125rem; }
   50% { opacity: 0.5; }
 }
 
+@keyframes rowHighlight {
+  from { background: rgba(99, 102, 241, 0.15); }
+  to   { background: transparent; }
+}
+
+.row-changed td {
+  animation: rowHighlight 1.5s ease forwards;
+}
+
 .animate-in {
   animation: fadeInUp 0.4s ease forwards;
 }
