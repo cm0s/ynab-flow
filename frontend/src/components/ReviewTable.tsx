@@ -1,5 +1,5 @@
 import { useState, useMemo, useCallback } from 'react';
-import type { PredictionRow, CategoryGroup, PayeeItem } from '../api/client';
+import type { PredictionRow, ImportRowData, CategoryGroup, PayeeItem } from '../api/client';
 import { CategoryPicker, PayeePicker } from './SearchablePicker';
 import {
   CheckCircle, AlertTriangle, HelpCircle, Zap, Clock, Brain,
@@ -11,17 +11,19 @@ import {
 export type ReviewStatus = 'pending' | 'accepted' | 'ignored';
 
 export interface ReviewedRow extends PredictionRow {
+  id: string;
   status: ReviewStatus;
   editedPayee: string;
   editedCategory: string;
 }
 
-export function toReviewedRows(predictions: PredictionRow[]): ReviewedRow[] {
+export function toReviewedRows(predictions: ImportRowData[]): ReviewedRow[] {
   return predictions.map((p) => ({
     ...p,
-    status: p.review_required ? 'pending' : 'accepted',
-    editedPayee: p.payee || '',
-    editedCategory: p.category || '',
+    id: p.id,
+    status: (p.status as ReviewStatus) || (p.review_required ? 'pending' : 'accepted'),
+    editedPayee: p.edited_payee ?? p.payee ?? '',
+    editedCategory: p.edited_category ?? p.category ?? '',
   }));
 }
 

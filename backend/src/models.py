@@ -96,6 +96,51 @@ class Transaction(Base):
     category = relationship("Category", back_populates="transactions")
 
 
+class ImportBatch(Base):
+    __tablename__ = 'import_batches'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    plan_id = Column(String, ForeignKey('plans.id'), nullable=False)
+    filename = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="active")  # active | completed | abandoned
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    plan = relationship("Plan")
+    rows = relationship("ImportRow", back_populates="batch", cascade="all, delete-orphan")
+
+
+class ImportRow(Base):
+    __tablename__ = 'import_rows'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    batch_id = Column(String, ForeignKey('import_batches.id'), nullable=False)
+    row_index = Column(Integer, nullable=False)
+
+    # CSV / prediction fields
+    date = Column(String, nullable=False)
+    original_memo = Column(String, nullable=False)
+    cleaned_memo = Column(String, nullable=False, default="")
+    merchant_stem = Column(String, nullable=False, default="")
+    amount = Column(Float, nullable=False)
+    label = Column(String, nullable=False, default="")
+    source_category = Column(String, nullable=False, default="")
+    payee = Column(String, nullable=True)
+    category = Column(String, nullable=True)
+    confidence = Column(Float, nullable=False, default=0.0)
+    source = Column(String, nullable=False, default="unclassified")
+    explanation = Column(String, nullable=False, default="")
+    review_required = Column(Boolean, nullable=False, default=True)
+    flag_ignore = Column(Boolean, nullable=False, default=False)
+
+    # Review state
+    status = Column(String, nullable=False, default="pending")  # pending | accepted | ignored
+    edited_payee = Column(String, nullable=False, default="")
+    edited_category = Column(String, nullable=False, default="")
+
+    batch = relationship("ImportBatch", back_populates="rows")
+
+
 class Rule(Base):
     __tablename__ = 'rules'
 

@@ -4,8 +4,8 @@ import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
   CheckCircle, AlertCircle, XCircle, Settings, BarChart3,
 } from 'lucide-react';
-import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, fetchPayees, writeBack, createRule, reclassify } from './api/client';
-import type { Plan, PredictionRow, Account, CategoryGroup, PayeeItem, WriteBackResponse } from './api/client';
+import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, fetchPayees, writeBack, createRule, reclassify, fetchActiveBatch, updateImportRows, completeBatch } from './api/client';
+import type { Plan, ImportRowData, Account, CategoryGroup, PayeeItem, WriteBackResponse } from './api/client';
 import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
 import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
@@ -18,12 +18,9 @@ type View = 'import' | 'review' | 'push' | 'settings' | 'dashboard';
 
 function AppContent() {
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
-  const [predictions, setPredictions] = useState<PredictionRow[]>(() => {
-    try { return JSON.parse(localStorage.getItem('ynab_flow_predictions') || '[]'); } catch { return []; }
-  });
-  const [reviewRows, setReviewRows] = useState<ReviewedRow[]>(() => {
-    try { return JSON.parse(localStorage.getItem('ynab_flow_review_rows') || '[]'); } catch { return []; }
-  });
+  const [batchId, setBatchId] = useState<string | null>(null);
+  const [predictions, setPredictions] = useState<ImportRowData[]>([]);
+  const [reviewRows, setReviewRows] = useState<ReviewedRow[]>([]);
   const [view, setView] = useState<View>('import');
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [writeMode, setWriteMode] = useState<string>('dry_run');
@@ -31,22 +28,6 @@ function AppContent() {
   const [ruleToast, setRuleToast] = useState<string | null>(null);
   const [isReclassifying, setIsReclassifying] = useState(false);
   const [changedRows, setChangedRows] = useState<Set<number>>(new Set());
-
-  // Persist import data across reloads
-  useEffect(() => {
-    localStorage.setItem('ynab_flow_predictions', JSON.stringify(predictions));
-  }, [predictions]);
-  useEffect(() => {
-    localStorage.setItem('ynab_flow_review_rows', JSON.stringify(reviewRows));
-  }, [reviewRows]);
-
-  // Clear persisted data when all rows are reviewed (none pending)
-  useEffect(() => {
-    if (reviewRows.length > 0 && reviewRows.every((r) => r.status !== 'pending')) {
-      localStorage.removeItem('ynab_flow_predictions');
-      localStorage.removeItem('ynab_flow_review_rows');
-    }
-  }, [reviewRows]);
 
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: fetchPlans });
 
@@ -67,6 +48,24 @@ function AppContent() {
     queryFn: () => fetchPayees(selectedPlanId),
     enabled: !!selectedPlanId,
   });
+
+  // Load active import batch from DB on startup
+  const activeBatchQuery = useQuery({
+    queryKey: ['activeBatch', selectedPlanId],
+    queryFn: () => fetchActiveBatch(selectedPlanId),
+    enabled: !!selectedPlanId,
+    retry: false,
+  });
+
+  // Populate state from active batch
+  useEffect(() => {
+    if (activeBatchQuery.data && !batchId) {
+      const { batch_id, rows } = activeBatchQuery.data;
+      setBatchId(batch_id);
+      setPredictions(rows);
+      setReviewRows(toReviewedRows(rows));
+    }
+  }, [activeBatchQuery.data, batchId]);
 
   const syncMutation = useMutation({
     mutationFn: async () => {
@@ -89,6 +88,7 @@ function AppContent() {
       return uploadCSV(selectedPlanId, file);
     },
     onSuccess: (data) => {
+      setBatchId(data.batch_id || null);
       setPredictions(data.predictions);
       setReviewRows(toReviewedRows(data.predictions));
       setView('review');
@@ -108,8 +108,16 @@ function AppContent() {
       }));
       return writeBack(selectedPlanId, writeMode, txns);
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setWriteResult(data);
+      // Mark batch as completed for non-dry-run writes
+      if (data.mode !== 'dry_run' && batchId) {
+        await completeBatch(batchId).catch(() => {});
+        setBatchId(null);
+        setPredictions([]);
+        setReviewRows([]);
+        queryClient.invalidateQueries({ queryKey: ['activeBatch', selectedPlanId] });
+      }
     },
   });
 
@@ -129,7 +137,15 @@ function AppContent() {
   const handleUpdateRow = useCallback((index: number, update: Partial<ReviewedRow>) => {
     setReviewRows((prev) => {
       const next = [...prev];
-      next[index] = { ...next[index], ...update };
+      const row = { ...next[index], ...update };
+      next[index] = row;
+      // Persist to DB
+      updateImportRows([{
+        id: row.id,
+        status: update.status ?? row.status,
+        edited_payee: update.editedPayee ?? row.editedPayee,
+        edited_category: update.editedCategory ?? row.editedCategory,
+      }]).catch(() => {});
       return next;
     });
   }, []);
@@ -137,58 +153,46 @@ function AppContent() {
   const handleBulkAction = useCallback((indices: number[], status: ReviewStatus) => {
     setReviewRows((prev) => {
       const next = [...prev];
-      indices.forEach((i) => {
+      const updates = indices.map((i) => {
         next[i] = { ...next[i], status };
+        return { id: next[i].id, status };
       });
+      // Persist to DB
+      updateImportRows(updates).catch(() => {});
       return next;
     });
   }, []);
 
   /* ---- Re-classify current rows through the pipeline ---- */
   const reclassifyRows = useCallback(async () => {
-    if (!selectedPlanId || reviewRows.length === 0) return;
+    if (!selectedPlanId || !batchId) return;
     setIsReclassifying(true);
     try {
-      const txns = reviewRows.map((r) => ({
-        date: r.date,
-        memo: r.original_memo,
-        amount: r.amount,
-        label: r.label,
-        source_category: r.source_category,
-      }));
-      const result = await reclassify(selectedPlanId, txns);
+      const result = await reclassify(selectedPlanId, batchId);
       setPredictions(result.predictions);
       setReviewRows((prev) => {
         const updated = toReviewedRows(result.predictions);
         const changed = new Set<number>();
-        const merged = updated.map((newRow, i) => {
+        updated.forEach((newRow, i) => {
           const old = prev[i];
-          if (!old) return newRow;
-          // Track rows where classification changed
+          if (!old) return;
           if (old.payee !== newRow.payee || old.category !== newRow.category || old.source !== newRow.source) {
             changed.add(newRow.row_index);
           }
-          // Keep user overrides if they manually accepted/ignored or edited fields
-          if (old.status === 'ignored') return { ...newRow, status: 'ignored' as const };
-          if (old.editedPayee !== (old.payee || '') || old.editedCategory !== (old.category || '')) {
-            return { ...newRow, status: old.status, editedPayee: old.editedPayee, editedCategory: old.editedCategory };
-          }
-          return newRow;
         });
-        // Set changed rows for highlighting (clear after animation)
         if (changed.size > 0) {
           setChangedRows(changed);
           setTimeout(() => setChangedRows(new Set()), 3000);
         }
-        return merged;
+        return updated;
       });
-      const count = reviewRows.length;
+      const count = result.predictions.length;
       setRuleToast(`Reclassification complete — ${count} transactions re-evaluated`);
       setTimeout(() => setRuleToast(null), 2000);
     } finally {
       setIsReclassifying(false);
     }
-  }, [selectedPlanId, reviewRows]);
+  }, [selectedPlanId, batchId]);
 
   /* ---- Create rule from correction (FR-12) ---- */
   const handleCreateRule = useCallback(async (row: ReviewedRow) => {

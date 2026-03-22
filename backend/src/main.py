@@ -17,7 +17,7 @@ from src.ml_classifier import MLClassifier
 from src.csv_service import CSVTransaction, parse_csv, bulk_predict
 from src.write_back_service import WriteBackService, WriteTransaction
 from src.transfer_detector import detect_transfer
-from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction
+from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow
 
 app = FastAPI(title="YNAB Flow API")
 
@@ -232,13 +232,41 @@ def train_models(plan_id: str, db: Session = Depends(get_db)):
 # Phase 5 endpoints
 # ---------------------------------------------------------------------------
 
+def _batch_rows_to_dicts(rows: list) -> list:
+    """Convert ImportRow list to API response dicts."""
+    return [
+        {
+            "id": r.id,
+            "row_index": r.row_index,
+            "date": r.date,
+            "original_memo": r.original_memo,
+            "cleaned_memo": r.cleaned_memo,
+            "merchant_stem": r.merchant_stem,
+            "amount": r.amount,
+            "label": r.label,
+            "source_category": r.source_category,
+            "payee": r.payee,
+            "category": r.category,
+            "confidence": r.confidence,
+            "source": r.source,
+            "explanation": r.explanation,
+            "review_required": r.review_required,
+            "flag_ignore": r.flag_ignore,
+            "status": r.status,
+            "edited_payee": r.edited_payee,
+            "edited_category": r.edited_category,
+        }
+        for r in sorted(rows, key=lambda r: r.row_index)
+    ]
+
+
 @app.post("/upload-csv")
 async def upload_csv(
     plan_id: str = Query(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
-    """Upload a bank CSV and get bulk predictions."""
+    """Upload a bank CSV and get bulk predictions, persisted as an import batch."""
     plan = db.query(Plan).filter(Plan.id == plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found.")
@@ -246,38 +274,170 @@ async def upload_csv(
     content = (await file.read()).decode("utf-8-sig")
     transactions = parse_csv(content)
     results = bulk_predict(db, plan_id, transactions)
-    return {"count": len(results), "predictions": [asdict(r) for r in results]}
 
+    # Abandon any existing active batch for this plan
+    db.query(ImportBatch).filter(
+        ImportBatch.plan_id == plan_id, ImportBatch.status == "active"
+    ).update({"status": "abandoned"})
 
-class ReclassifyItem(BaseModel):
-    date: str
-    memo: str
-    amount: float
-    label: str = ""
-    source_category: str = ""
+    # Create new batch and rows
+    batch = ImportBatch(plan_id=plan_id, filename=file.filename)
+    db.add(batch)
+    db.flush()
+
+    for r in results:
+        d = asdict(r)
+        auto_approved = not d["review_required"] and not d["flag_ignore"]
+        row = ImportRow(
+            batch_id=batch.id,
+            row_index=d["row_index"],
+            date=d["date"],
+            original_memo=d["original_memo"],
+            cleaned_memo=d["cleaned_memo"],
+            merchant_stem=d["merchant_stem"],
+            amount=d["amount"],
+            label=d["label"],
+            source_category=d["source_category"],
+            payee=d["payee"],
+            category=d["category"],
+            confidence=d["confidence"],
+            source=d["source"],
+            explanation=d["explanation"],
+            review_required=d["review_required"],
+            flag_ignore=d["flag_ignore"],
+            status="accepted" if auto_approved else "pending",
+            edited_payee=d["payee"] or "",
+            edited_category=d["category"] or "",
+        )
+        db.add(row)
+    db.commit()
+
+    rows_out = _batch_rows_to_dicts(batch.rows)
+    return {"batch_id": batch.id, "count": len(rows_out), "predictions": rows_out}
+
 
 class ReclassifyRequest(BaseModel):
     plan_id: str
-    transactions: List[ReclassifyItem]
+    batch_id: Optional[str] = None
 
 @app.post("/reclassify")
 def reclassify(req: ReclassifyRequest, db: Session = Depends(get_db)):
-    """Re-run classification on previously imported transactions."""
+    """Re-run classification on a persisted import batch."""
     plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found.")
 
+    # Find the batch to reclassify
+    if req.batch_id:
+        batch = db.query(ImportBatch).filter(ImportBatch.id == req.batch_id).first()
+    else:
+        batch = db.query(ImportBatch).filter(
+            ImportBatch.plan_id == req.plan_id, ImportBatch.status == "active"
+        ).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="No active import batch found.")
+
+    import_rows = sorted(batch.rows, key=lambda r: r.row_index)
     csv_txns = [
         CSVTransaction(
-            date=t.date, memo=t.memo,
-            inflow=t.amount if t.amount >= 0 else None,
-            outflow=-t.amount if t.amount < 0 else None,
-            label=t.label, source_category=t.source_category,
+            date=r.date, memo=r.original_memo,
+            inflow=r.amount if r.amount >= 0 else None,
+            outflow=-r.amount if r.amount < 0 else None,
+            label=r.label, source_category=r.source_category,
         )
-        for t in req.transactions
+        for r in import_rows
     ]
     results = bulk_predict(db, req.plan_id, csv_txns)
-    return {"count": len(results), "predictions": [asdict(r) for r in results]}
+
+    # Update import rows with new predictions, preserving user overrides
+    for import_row, pred in zip(import_rows, results):
+        d = asdict(pred)
+        user_edited_payee = import_row.edited_payee != (import_row.payee or "")
+        user_edited_category = import_row.edited_category != (import_row.category or "")
+
+        import_row.payee = d["payee"]
+        import_row.category = d["category"]
+        import_row.confidence = d["confidence"]
+        import_row.source = d["source"]
+        import_row.explanation = d["explanation"]
+        import_row.review_required = d["review_required"]
+        import_row.flag_ignore = d["flag_ignore"]
+        import_row.cleaned_memo = d["cleaned_memo"]
+        import_row.merchant_stem = d["merchant_stem"]
+
+        # Don't overwrite user edits
+        if not user_edited_payee:
+            import_row.edited_payee = d["payee"] or ""
+        if not user_edited_category:
+            import_row.edited_category = d["category"] or ""
+        # Don't change status if user manually set it to ignored
+        if import_row.status != "ignored":
+            auto_approved = not d["review_required"] and not d["flag_ignore"]
+            if not user_edited_payee and not user_edited_category:
+                import_row.status = "accepted" if auto_approved else "pending"
+
+    db.commit()
+    rows_out = _batch_rows_to_dicts(batch.rows)
+    return {"batch_id": batch.id, "count": len(rows_out), "predictions": rows_out}
+
+
+# ---------------------------------------------------------------------------
+# Import batch management endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/import-batches/{plan_id}/active")
+def get_active_batch(plan_id: str, db: Session = Depends(get_db)):
+    """Return the active import batch for a plan, or 404."""
+    batch = db.query(ImportBatch).filter(
+        ImportBatch.plan_id == plan_id, ImportBatch.status == "active"
+    ).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="No active import batch.")
+    return {
+        "batch_id": batch.id,
+        "filename": batch.filename,
+        "created_at": batch.created_at.isoformat() if batch.created_at else None,
+        "rows": _batch_rows_to_dicts(batch.rows),
+    }
+
+
+class ImportRowUpdate(BaseModel):
+    id: str
+    status: Optional[str] = None
+    edited_payee: Optional[str] = None
+    edited_category: Optional[str] = None
+
+class ImportRowsUpdateRequest(BaseModel):
+    updates: List[ImportRowUpdate]
+
+@app.patch("/import-rows")
+def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_db)):
+    """Bulk-save review state changes on import rows."""
+    updated = 0
+    for u in req.updates:
+        row = db.query(ImportRow).filter(ImportRow.id == u.id).first()
+        if not row:
+            continue
+        if u.status is not None:
+            row.status = u.status
+        if u.edited_payee is not None:
+            row.edited_payee = u.edited_payee
+        if u.edited_category is not None:
+            row.edited_category = u.edited_category
+        updated += 1
+    db.commit()
+    return {"updated": updated}
+
+
+@app.post("/import-batches/{batch_id}/complete")
+def complete_batch(batch_id: str, db: Session = Depends(get_db)):
+    """Mark an import batch as completed."""
+    batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    batch.status = "completed"
+    db.commit()
+    return {"status": "completed"}
 
 
 @app.put("/rules/{rule_id}")
