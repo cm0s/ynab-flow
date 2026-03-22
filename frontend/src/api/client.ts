@@ -42,9 +42,17 @@ export interface PredictionRow {
   flag_ignore: boolean;
 }
 
+export interface ImportRowData extends PredictionRow {
+  id: string;
+  status: string;
+  edited_payee: string;
+  edited_category: string;
+}
+
 export interface UploadResult {
+  batch_id?: string;
   count: number;
-  predictions: PredictionRow[];
+  predictions: ImportRowData[];
 }
 
 export async function uploadCSV(planId: string, file: File): Promise<UploadResult> {
@@ -72,14 +80,40 @@ export const trainModels = (planId: string) =>
   request<{ status: string }>(`/train?plan_id=${planId}`, { method: 'POST' });
 
 /* ---- Reclassify ---- */
-export function reclassify(
-  planId: string,
-  transactions: { date: string; memo: string; amount: number; label: string; source_category: string }[],
-): Promise<UploadResult> {
+export function reclassify(planId: string, batchId?: string): Promise<UploadResult> {
   return request<UploadResult>('/reclassify', {
     method: 'POST',
-    body: JSON.stringify({ plan_id: planId, transactions }),
+    body: JSON.stringify({ plan_id: planId, batch_id: batchId }),
   });
+}
+
+/* ---- Import Batches ---- */
+export interface ActiveBatchResponse {
+  batch_id: string;
+  filename: string | null;
+  created_at: string | null;
+  rows: ImportRowData[];
+}
+
+export const fetchActiveBatch = (planId: string) =>
+  request<ActiveBatchResponse>(`/import-batches/${planId}/active`);
+
+export interface ImportRowUpdate {
+  id: string;
+  status?: string;
+  edited_payee?: string;
+  edited_category?: string;
+}
+
+export function updateImportRows(updates: ImportRowUpdate[]) {
+  return request<{ updated: number }>('/import-rows', {
+    method: 'PATCH',
+    body: JSON.stringify({ updates }),
+  });
+}
+
+export function completeBatch(batchId: string) {
+  return request<{ status: string }>(`/import-batches/${batchId}/complete`, { method: 'POST' });
 }
 
 /* ---- Accounts ---- */
