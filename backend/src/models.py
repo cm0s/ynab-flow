@@ -68,6 +68,7 @@ class Payee(Base):
     plan_id = Column(String, ForeignKey('plans.id'), nullable=False)
     ynab_payee_id = Column(String, unique=True, index=True, nullable=False)
     name = Column(String, nullable=False)
+    transfer_account_id = Column(String, nullable=True)  # YNAB account ID if this is a transfer payee
     deleted = Column(Boolean, default=False)
 
     plan = relationship("Plan")

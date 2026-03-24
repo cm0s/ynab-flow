@@ -126,3 +126,35 @@ def test_sync_uses_separate_knowledge_per_entity(service, db):
     txn = db.query(Transaction).filter(Transaction.ynab_transaction_id == "txn-1").first()
     assert txn is not None
     assert txn.memo == "Rent January"
+
+
+@respx.mock
+def test_sync_payees_stores_transfer_account_id(service, db):
+    """Sync should persist transfer_account_id for transfer payees."""
+    respx.get("https://api.ynab.com/v1/budgets").mock(return_value=Response(
+        200,
+        json={"data": {"budgets": [
+            {"id": "budget-1", "name": "B", "currency_format": {"iso_code": "CHF"},
+             "accounts": [{"id": "acc-1", "name": "Checking", "type": "checking", "closed": False}]}
+        ]}}
+    ))
+    service.sync_budgets()
+    plan = db.query(Plan).filter(Plan.ynab_plan_id == "budget-1").first()
+
+    respx.get("https://api.ynab.com/v1/budgets/budget-1/payees").mock(
+        return_value=Response(200, json={"data": {"payees": [
+            {"id": "payee-regular", "name": "Landlord", "deleted": False,
+             "transfer_account_id": None},
+            {"id": "payee-transfer", "name": "Transfer : Wise", "deleted": False,
+             "transfer_account_id": "acc-wise-123"},
+        ], "server_knowledge": 10}})
+    )
+    service.sync_payees(plan)
+
+    regular = db.query(Payee).filter(Payee.ynab_payee_id == "payee-regular").first()
+    assert regular is not None
+    assert regular.transfer_account_id is None
+
+    transfer = db.query(Payee).filter(Payee.ynab_payee_id == "payee-transfer").first()
+    assert transfer is not None
+    assert transfer.transfer_account_id == "acc-wise-123"

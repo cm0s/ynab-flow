@@ -108,11 +108,13 @@ class SyncService:
                      plan_id=plan.id,
                      ynab_payee_id=ynab_payee_id,
                      name=payee_data.get("name"),
+                     transfer_account_id=payee_data.get("transfer_account_id"),
                      deleted=payee_data.get("deleted", False)
                  )
                  self.db.add(payee)
              else:
                  payee.name = payee_data.get("name")
+                 payee.transfer_account_id = payee_data.get("transfer_account_id")
                  payee.deleted = payee_data.get("deleted", False)
                  
          new_knowledge = data.get("server_knowledge")
