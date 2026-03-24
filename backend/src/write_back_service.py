@@ -109,11 +109,17 @@ class WriteBackService:
                 "account_id": ynab_account_id,
                 "date": txn.date,
                 "amount": millis,
-                "payee_name": txn.payee_name,
                 "memo": txn.memo[:200] if txn.memo else "",
                 "cleared": txn.cleared,
                 "import_id": wr.import_id,
             }
+
+            # Resolve payee to YNAB ID; fall back to payee_name for new payees
+            payee_id = self._resolve_payee_id(plan.id, txn.payee_name)
+            if payee_id:
+                ynab_txn["payee_id"] = payee_id
+            else:
+                ynab_txn["payee_name"] = txn.payee_name
 
             # Resolve category to YNAB ID if possible
             cat_id = self._resolve_category_id(plan.id, txn.category_name)
@@ -194,6 +200,17 @@ class WriteBackService:
         raw = f"{txn.date}:{txn.amount:.2f}:{txn.payee_name}:{txn.memo[:50]}"
         digest = hashlib.md5(raw.encode()).hexdigest()[:8]
         return f"YNAB-Flow:{digest}"
+
+    def _resolve_payee_id(self, plan_id: str, payee_name: str) -> Optional[str]:
+        """Look up the YNAB payee ID from the local database."""
+        if not payee_name:
+            return None
+        payee = (
+            self.db.query(Payee)
+            .filter(Payee.plan_id == plan_id, Payee.name == payee_name, Payee.deleted == False)
+            .first()
+        )
+        return payee.ynab_payee_id if payee else None
 
     def _resolve_category_id(self, plan_id: str, category_name: str) -> Optional[str]:
         """Look up the YNAB category ID from the local database."""
