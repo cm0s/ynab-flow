@@ -29,6 +29,7 @@ class WriteTransaction:
     memo: str
     account_id: str        # Local account ID
     cleared: str = "uncleared"
+    flag_color: Optional[str] = None  # "red"|"orange"|"yellow"|"green"|"blue"|"purple" or None
 
 
 @dataclass
@@ -123,6 +124,9 @@ class WriteBackService:
                 "cleared": txn.cleared,
                 "import_id": wr.import_id,
             }
+
+            if txn.flag_color:
+                ynab_txn["flag_color"] = txn.flag_color
 
             # Resolve payee to YNAB ID; fall back to payee_name for new payees
             payee_id = self._resolve_payee_id(plan.id, txn.payee_name)

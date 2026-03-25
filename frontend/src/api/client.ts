@@ -47,6 +47,7 @@ export interface ImportRowData extends PredictionRow {
   status: string;
   edited_payee: string;
   edited_category: string;
+  flag_color: string;
 }
 
 export interface UploadResult {
@@ -103,6 +104,7 @@ export interface ImportRowUpdate {
   status?: string;
   edited_payee?: string;
   edited_category?: string;
+  flag_color?: string;
 }
 
 export function updateImportRows(updates: ImportRowUpdate[]) {
@@ -155,6 +157,7 @@ export interface WriteBackTransaction {
   memo: string;
   account_id: string;
   cleared?: string;
+  flag_color?: string;
 }
 
 export interface WriteBackResultItem {

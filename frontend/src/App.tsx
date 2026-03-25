@@ -105,6 +105,7 @@ function AppContent() {
         category_name: r.editedCategory,
         memo: r.original_memo,
         account_id: selectedAccountId,
+        flag_color: r.flagColor || undefined,
       }));
       return writeBack(selectedPlanId, writeMode, txns, batchId ?? undefined);
     },
@@ -157,6 +158,7 @@ function AppContent() {
         status: update.status ?? row.status,
         edited_payee: update.editedPayee ?? row.editedPayee,
         edited_category: update.editedCategory ?? row.editedCategory,
+        flag_color: update.flagColor ?? row.flagColor ?? '',
       }]).catch(() => {});
       return next;
     });

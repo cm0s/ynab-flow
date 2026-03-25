@@ -255,6 +255,7 @@ def _batch_rows_to_dicts(rows: list) -> list:
             "status": r.status,
             "edited_payee": r.edited_payee,
             "edited_category": r.edited_category,
+            "flag_color": r.flag_color,
         }
         for r in sorted(rows, key=lambda r: r.row_index)
     ]
@@ -406,6 +407,7 @@ class ImportRowUpdate(BaseModel):
     status: Optional[str] = None
     edited_payee: Optional[str] = None
     edited_category: Optional[str] = None
+    flag_color: Optional[str] = None
 
 class ImportRowsUpdateRequest(BaseModel):
     updates: List[ImportRowUpdate]
@@ -424,6 +426,8 @@ def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_d
             row.edited_payee = u.edited_payee
         if u.edited_category is not None:
             row.edited_category = u.edited_category
+        if u.flag_color is not None:
+            row.flag_color = u.flag_color
         updated += 1
     db.commit()
     return {"updated": updated}
@@ -531,6 +535,7 @@ class WriteBackTransactionItem(BaseModel):
     memo: str = ""
     account_id: str
     cleared: str = "uncleared"
+    flag_color: Optional[str] = None
 
 class WriteBackRequest(BaseModel):
     plan_id: str
@@ -560,6 +565,7 @@ def write_back(req: WriteBackRequest, db: Session = Depends(get_db)):
             memo=t.memo,
             account_id=t.account_id,
             cleared=t.cleared,
+            flag_color=t.flag_color,
         )
         for t in req.transactions
     ]
