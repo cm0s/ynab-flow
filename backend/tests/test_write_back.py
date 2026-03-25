@@ -181,6 +181,43 @@ def test_validation_rejects_bad_date(db, client, plan, account):
 
 
 @respx.mock
+def test_flag_color_passed_to_ynab(db, client, plan, account, payee_regular):
+    """When flag_color is set, the API call should include it."""
+    route = respx.post("https://api.ynab.com/v1/budgets/budget-1/transactions").mock(
+        return_value=Response(200, json={"data": {
+            "transaction_ids": ["txn-1"], "duplicate_import_ids": [],
+        }})
+    )
+
+    service = WriteBackService(db, client)
+    txn = _make_txn(flag_color="blue")
+    result = service.execute("plan-1", [txn], mode="create")
+
+    assert result.created == 1
+    import json
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["transactions"][0]["flag_color"] == "blue"
+
+
+@respx.mock
+def test_no_flag_color_omitted_from_ynab(db, client, plan, account, payee_regular):
+    """When flag_color is None, the API payload should not include flag_color."""
+    route = respx.post("https://api.ynab.com/v1/budgets/budget-1/transactions").mock(
+        return_value=Response(200, json={"data": {
+            "transaction_ids": ["txn-1"], "duplicate_import_ids": [],
+        }})
+    )
+
+    service = WriteBackService(db, client)
+    result = service.execute("plan-1", [_make_txn()], mode="create")
+
+    assert result.created == 1
+    import json
+    payload = json.loads(route.calls[0].request.content)
+    assert "flag_color" not in payload["transactions"][0]
+
+
+@respx.mock
 def test_ynab_api_error_marks_all_as_error(db, client, plan, account, payee_regular):
     """When YNAB API returns an error, all transactions should be marked as error."""
     respx.post("https://api.ynab.com/v1/budgets/budget-1/transactions").mock(

@@ -1,20 +1,24 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import type { PredictionRow, ImportRowData, CategoryGroup, PayeeItem } from '../api/client';
 import { CategoryPicker, PayeePicker } from './SearchablePicker';
 import {
   CheckCircle, AlertTriangle, HelpCircle, Zap, Clock, Brain,
   Check, X, Eye, EyeOff, Filter, CheckCheck, Pencil, Search,
-  ArrowUp, ArrowDown, ArrowUpDown,
+  ArrowUp, ArrowDown, ArrowUpDown, Flag,
 } from 'lucide-react';
 
 /* ---- Review state per row ---- */
 export type ReviewStatus = 'pending' | 'accepted' | 'ignored';
+
+export type FlagColor = '' | 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple';
 
 export interface ReviewedRow extends PredictionRow {
   id: string;
   status: ReviewStatus;
   editedPayee: string;
   editedCategory: string;
+  flagColor: FlagColor;
 }
 
 export function toReviewedRows(predictions: ImportRowData[]): ReviewedRow[] {
@@ -24,6 +28,7 @@ export function toReviewedRows(predictions: ImportRowData[]): ReviewedRow[] {
     status: (p.status as ReviewStatus) || (p.review_required ? 'pending' : 'accepted'),
     editedPayee: p.edited_payee ?? p.payee ?? '',
     editedCategory: p.edited_category ?? p.category ?? '',
+    flagColor: (p.flag_color || '') as FlagColor,
   }));
 }
 
@@ -68,6 +73,82 @@ const confLevel = (c: number) =>
 function formatAmount(amount: number) {
   const abs = Math.abs(amount).toFixed(2);
   return amount >= 0 ? `+${abs}` : `-${abs}`;
+}
+
+/* ---- Flag colors ---- */
+const FLAG_COLORS: { value: FlagColor; color: string; label: string }[] = [
+  { value: '', color: 'transparent', label: 'No flag' },
+  { value: 'red', color: '#e54545', label: 'Red' },
+  { value: 'orange', color: '#e5a545', label: 'Orange' },
+  { value: 'yellow', color: '#e5d545', label: 'Yellow' },
+  { value: 'green', color: '#45b545', label: 'Green' },
+  { value: 'blue', color: '#4595e5', label: 'Blue' },
+  { value: 'purple', color: '#9545e5', label: 'Purple' },
+];
+
+function FlagPicker({ value, onChange }: { value: FlagColor; onChange: (c: FlagColor) => void }) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const current = FLAG_COLORS.find((f) => f.value === value) || FLAG_COLORS[0];
+
+  const handleOpen = useCallback(() => {
+    setOpen((prev) => {
+      if (!prev && btnRef.current) {
+        const rect = btnRef.current.getBoundingClientRect();
+        setPos({ top: rect.bottom + 4, left: rect.left });
+      }
+      return !prev;
+    });
+  }, []);
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        className="btn btn-ghost"
+        style={{ padding: '2px 4px', lineHeight: 1 }}
+        onClick={handleOpen}
+        title={current.label}
+      >
+        <Flag size={14} fill={value ? current.color : 'none'} color={value ? current.color : 'var(--text-muted)'} />
+      </button>
+      {open && createPortal(
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+            onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setOpen(false); }}
+          />
+          <div style={{
+            position: 'fixed', top: pos.top, left: pos.left, zIndex: 9999,
+            background: 'var(--bg-card)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)', padding: 4,
+            display: 'flex', gap: 2, boxShadow: 'var(--shadow-glow)',
+          }}>
+            {FLAG_COLORS.map((f) => (
+              <button
+                key={f.value || 'none'}
+                className="btn btn-ghost"
+                style={{
+                  padding: 4, lineHeight: 1, borderRadius: 'var(--radius-sm)',
+                  outline: value === f.value ? '2px solid var(--accent)' : 'none',
+                }}
+                title={f.label}
+                onClick={() => { onChange(f.value); setOpen(false); }}
+              >
+                {f.value ? (
+                  <div style={{ width: 14, height: 14, borderRadius: '50%', background: f.color }} />
+                ) : (
+                  <X size={14} color="var(--text-muted)" />
+                )}
+              </button>
+            ))}
+          </div>
+        </>,
+        document.body,
+      )}
+    </>
+  );
 }
 
 /* ---- Props ---- */
@@ -258,19 +339,7 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
       {/* ---- Table ---- */}
       <div className="card" style={{ overflowY: 'auto', maxHeight: '65vh' }}>
         <table className="results-table">
-          <colgroup>
-            <col style={{ width: 36 }} />
-            <col style={{ width: 95 }} />   {/* Date */}
-            <col />                         {/* Memo — takes remaining space */}
-            <col style={{ width: 95 }} />   {/* Amount */}
-            <col style={{ width: 140 }} />  {/* Payee */}
-            <col style={{ width: 140 }} />  {/* Category */}
-            <col style={{ width: 110 }} />  {/* Source Cat. */}
-            <col style={{ width: 140 }} />  {/* Source */}
-            <col style={{ width: 95 }} />   {/* Conf. */}
-            <col style={{ width: 110 }} />  {/* Status */}
-            <col style={{ width: 110 }} />  {/* Actions */}
-          </colgroup>
+          <colgroup>{/* Checkbox */}<col style={{ width: 36 }} />{/* Flag */}<col style={{ width: 36 }} />{/* Date */}<col style={{ width: 95 }} />{/* Memo */}<col />{/* Amount */}<col style={{ width: 95 }} />{/* Payee */}<col style={{ width: 140 }} />{/* Category */}<col style={{ width: 140 }} />{/* Source Cat. */}<col style={{ width: 110 }} />{/* Source */}<col style={{ width: 140 }} />{/* Conf. */}<col style={{ width: 95 }} />{/* Status */}<col style={{ width: 110 }} />{/* Actions */}<col style={{ width: 110 }} /></colgroup>
           <thead>
             <tr>
               <th>
@@ -281,6 +350,7 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                   style={{ accentColor: 'var(--accent)' }}
                 />
               </th>
+              <th><Flag size={14} /></th>
               {([
                 ['date', 'Date'],
                 ['memo', 'Memo'],
@@ -327,6 +397,14 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                       checked={selected.has(originalIndex)}
                       onChange={() => toggleSelect(originalIndex)}
                       style={{ accentColor: 'var(--accent)' }}
+                    />
+                  </td>
+
+                  {/* Flag */}
+                  <td style={{ textAlign: 'center', overflow: 'visible', textOverflow: 'clip' }}>
+                    <FlagPicker
+                      value={row.flagColor}
+                      onChange={(c) => onUpdateRow(originalIndex, { flagColor: c })}
                     />
                   </td>
 
