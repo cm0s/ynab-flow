@@ -181,10 +181,11 @@ export function writeBack(
   planId: string,
   mode: string,
   transactions: WriteBackTransaction[],
+  batchId?: string,
 ): Promise<WriteBackResponse> {
   return request<WriteBackResponse>('/write-back', {
     method: 'POST',
-    body: JSON.stringify({ plan_id: planId, mode, transactions }),
+    body: JSON.stringify({ plan_id: planId, mode, transactions, batch_id: batchId }),
   });
 }
 

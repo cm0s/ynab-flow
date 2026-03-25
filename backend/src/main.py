@@ -536,6 +536,7 @@ class WriteBackRequest(BaseModel):
     plan_id: str
     mode: str = "dry_run"  # "dry_run" | "create" | "create_or_skip"
     transactions: List[WriteBackTransactionItem]
+    batch_id: Optional[str] = None
 
 @app.post("/write-back")
 def write_back(req: WriteBackRequest, db: Session = Depends(get_db)):
@@ -563,7 +564,7 @@ def write_back(req: WriteBackRequest, db: Session = Depends(get_db)):
         for t in req.transactions
     ]
 
-    result = service.execute(req.plan_id, txns, mode=req.mode)
+    result = service.execute(req.plan_id, txns, mode=req.mode, batch_id=req.batch_id)
 
     return {
         "mode": result.mode,

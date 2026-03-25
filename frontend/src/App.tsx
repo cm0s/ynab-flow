@@ -106,12 +106,12 @@ function AppContent() {
         memo: r.original_memo,
         account_id: selectedAccountId,
       }));
-      return writeBack(selectedPlanId, writeMode, txns);
+      return writeBack(selectedPlanId, writeMode, txns, batchId ?? undefined);
     },
     onSuccess: async (data) => {
       setWriteResult(data);
-      // For non-dry-run writes, remove pushed (accepted) rows and keep the rest
-      if (data.mode !== 'dry_run' && batchId) {
+      // For non-dry-run writes, remove pushed (accepted) rows only if some were actually created
+      if (data.mode !== 'dry_run' && batchId && data.created > 0) {
         const remainingPredictions = predictions.filter(
           (_, i) => reviewRows[i]?.status !== 'accepted'
         );
@@ -502,7 +502,7 @@ function AppContent() {
                   <div style={{ overflow: 'auto', maxHeight: '40vh', marginTop: 16 }}>
                     <table className="results-table">
                       <thead>
-                        <tr><th>#</th><th>Date</th><th>Payee</th><th>Amount</th><th>Status</th><th>YNAB ID</th></tr>
+                        <tr><th>#</th><th>Date</th><th>Payee</th><th>Amount</th><th>Status</th><th>Details</th></tr>
                       </thead>
                       <tbody>
                         {writeResult.results.map((r) => (
