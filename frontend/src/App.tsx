@@ -110,13 +110,25 @@ function AppContent() {
     },
     onSuccess: async (data) => {
       setWriteResult(data);
-      // Mark batch as completed for non-dry-run writes
+      // For non-dry-run writes, remove pushed (accepted) rows and keep the rest
       if (data.mode !== 'dry_run' && batchId) {
-        await completeBatch(batchId).catch(() => {});
-        setBatchId(null);
-        setPredictions([]);
-        setReviewRows([]);
-        queryClient.invalidateQueries({ queryKey: ['activeBatch', selectedPlanId] });
+        const remainingPredictions = predictions.filter(
+          (_, i) => reviewRows[i]?.status !== 'accepted'
+        );
+        const remainingRows = reviewRows.filter((r) => r.status !== 'accepted');
+
+        if (remainingRows.length === 0) {
+          // All rows pushed — complete the batch
+          await completeBatch(batchId).catch(() => {});
+          setBatchId(null);
+          setPredictions([]);
+          setReviewRows([]);
+          queryClient.invalidateQueries({ queryKey: ['activeBatch', selectedPlanId] });
+        } else {
+          // Keep remaining rows for further review
+          setPredictions(remainingPredictions);
+          setReviewRows(remainingRows);
+        }
       }
     },
   });
@@ -240,7 +252,11 @@ function AppContent() {
   const acceptedCount = reviewRows.filter((r) => r.status === 'accepted').length;
 
   const goBack = () => {
-    if (view === 'push') { setView('review'); setWriteResult(null); }
+    if (view === 'push') {
+      setWriteResult(null);
+      // If no rows remain after push, go back to import; otherwise review
+      setView(reviewRows.length > 0 ? 'review' : 'import');
+    }
     else if (view === 'review') setView('import');
     else if (view === 'settings') setView('import');
     else if (view === 'dashboard') setView('import');
