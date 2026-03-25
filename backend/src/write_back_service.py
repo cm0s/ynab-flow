@@ -7,6 +7,7 @@ Supports dry-run, create-only, and create-or-skip-if-duplicate modes.
 
 import hashlib
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
@@ -68,6 +69,7 @@ class WriteBackService:
         plan_id: str,
         transactions: List[WriteTransaction],
         mode: str = "dry_run",  # "dry_run" | "create" | "create_or_skip"
+        batch_id: Optional[str] = None,
     ) -> WriteBackResult:
         """
         Validate and optionally write transactions to YNAB.
@@ -79,9 +81,17 @@ class WriteBackService:
         result = WriteBackResult(mode=mode, total=len(transactions))
 
         # Build YNAB payloads with validation
+        # Track occurrence counts so identical transactions get unique import_ids
+        occurrence_counts: dict[str, int] = {}
         payloads = []
         for i, txn in enumerate(transactions):
             wr = self._validate_and_build(plan, txn, i)
+            # Assign import_id with occurrence counter to avoid collisions
+            # Include batch_id so re-imports after deletion get fresh IDs
+            base_id = self._generate_import_id(txn, occurrence=1, batch_id=batch_id)
+            base_key = base_id.rsplit(":", 1)[0]  # strip the ":1" suffix
+            occurrence_counts[base_key] = occurrence_counts.get(base_key, 0) + 1
+            wr.import_id = f"{base_key}:{occurrence_counts[base_key]}"
             result.results.append(wr)
 
             if wr.status.startswith("dry_run_error") or wr.status == "error":
@@ -131,9 +141,26 @@ class WriteBackService:
 
         # Send to YNAB
         try:
+            import_ids = [t["import_id"] for t in ynab_txns]
+            unique_import_ids = set(import_ids)
+            logger.info(
+                "Sending %d transactions to YNAB (%d unique import_ids)",
+                len(ynab_txns), len(unique_import_ids),
+            )
+            if len(unique_import_ids) < len(import_ids):
+                from collections import Counter
+                dupes = {k: v for k, v in Counter(import_ids).items() if v > 1}
+                logger.warning("Duplicate import_ids within batch: %s", dupes)
+
+            t0 = time.monotonic()
             response = self.ynab.create_transactions(plan.ynab_plan_id, ynab_txns)
+            elapsed = time.monotonic() - t0
             created_ids = response.get("transaction_ids", [])
             duplicate_ids = response.get("duplicate_import_ids", [])
+            logger.info(
+                "YNAB responded in %.1fs: %d created_ids, %d duplicate_import_ids, keys=%s",
+                elapsed, len(created_ids), len(duplicate_ids), list(response.keys()),
+            )
 
             for j, idx in enumerate(payload_indices):
                 wr = result.results[idx]
@@ -143,6 +170,7 @@ class WriteBackService:
                     result.created += 1
                 elif wr.import_id in duplicate_ids:
                     wr.status = "skipped"
+                    wr.error = "Duplicate: already exists in YNAB"
                     result.skipped += 1
                 else:
                     wr.status = "created"
@@ -165,7 +193,6 @@ class WriteBackService:
             payee_name=txn.payee_name,
             amount=txn.amount,
             status="pending",
-            import_id=self._generate_import_id(txn),
         )
 
         # Validate account exists
@@ -192,14 +219,22 @@ class WriteBackService:
         return wr
 
     @staticmethod
-    def _generate_import_id(txn: WriteTransaction) -> str:
+    def _generate_import_id(
+        txn: WriteTransaction, occurrence: int = 1, batch_id: Optional[str] = None,
+    ) -> str:
         """
         Generate a deterministic import_id for deduplication (FR-9.3).
         YNAB uses import_id to prevent duplicates on repeated imports.
+        Includes batch_id so that re-importing a CSV (new batch) after
+        deleting transactions in YNAB produces fresh import_ids.
+        The occurrence counter distinguishes transactions that share the
+        same date/amount/payee/memo (e.g. two identical purchases on one day).
         """
         raw = f"{txn.date}:{txn.amount:.2f}:{txn.payee_name}:{txn.memo[:50]}"
+        if batch_id:
+            raw += f":{batch_id}"
         digest = hashlib.md5(raw.encode()).hexdigest()[:8]
-        return f"YNAB-Flow:{digest}"
+        return f"YF:{digest}:{occurrence}"
 
     def _resolve_payee_id(self, plan_id: str, payee_name: str) -> Optional[str]:
         """Look up the YNAB payee ID from the local database."""

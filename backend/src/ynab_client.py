@@ -61,7 +61,12 @@ class YnabClient:
         return self._get(f"/budgets/{budget_id}/transactions", params=params)
 
     def _post(self, endpoint: str, json_body: Dict[str, Any]) -> Dict[str, Any]:
+        import logging
+        logger = logging.getLogger(__name__)
+        txn_count = len(json_body.get("transactions", []))
+        logger.info("POST %s (%d transactions)", endpoint, txn_count)
         response = self.client.post(endpoint, json=json_body)
+        logger.info("POST %s completed: %d in %.1fs", endpoint, response.status_code, response.elapsed.total_seconds())
 
         if response.status_code >= 400:
             error_detail = response.text
