@@ -2,10 +2,14 @@
 CSV Upload & Bulk Prediction Service
 
 Parses bank CSV exports and runs each transaction through the orchestrator.
+Supports:
+  - Generic format: Date,Memo,Inflow,Outflow,Label,Catégorie
+  - PostFinance format: semicolon-separated with metadata header rows
 """
 
 import csv
 import io
+import re
 from dataclasses import dataclass, asdict
 from typing import List, Optional
 from sqlalchemy.orm import Session
@@ -53,10 +57,78 @@ class BulkPredictionRow:
     flag_ignore: bool
 
 
-def parse_csv(file_content: str) -> List[CSVTransaction]:
+def _is_postfinance(file_content: str) -> bool:
+    """Detect PostFinance CSV by checking for its metadata header."""
+    first_line = file_content.split("\n", 1)[0]
+    return first_line.startswith("Date de d")
+
+
+def _convert_date_dmy(date_str: str) -> str:
+    """Convert DD.MM.YYYY to YYYY-MM-DD."""
+    match = re.match(r"(\d{2})\.(\d{2})\.(\d{4})", date_str)
+    if not match:
+        return date_str
+    return f"{match.group(3)}-{match.group(2)}-{match.group(1)}"
+
+
+def _parse_postfinance(file_content: str) -> List[CSVTransaction]:
     """
-    Parse a bank CSV with columns: Date, Memo, Inflow, Outflow, Label, Catégorie.
-    Skips empty rows and rows with invalid dates.
+    Parse a PostFinance CSV export.
+
+    Format: 4 metadata lines, blank line, header line, blank line, then data.
+    Columns: Date;Type de transaction;Texte de notification;Crédit en CHF;Débit en CHF;Label;Catégorie
+    """
+    lines = file_content.splitlines()
+
+    # Find the header row (contains "Date;")
+    header_idx = None
+    for i, line in enumerate(lines):
+        if line.startswith("Date;"):
+            header_idx = i
+            break
+    if header_idx is None:
+        return []
+
+    # Rejoin from header onward for csv.DictReader
+    csv_block = "\n".join(lines[header_idx:])
+    reader = csv.DictReader(io.StringIO(csv_block), delimiter=";")
+    transactions = []
+
+    for row in reader:
+        date_raw = (row.get("Date") or "").strip()
+        memo = (row.get("Texte de notification") or "").strip()
+
+        if not date_raw or not memo:
+            continue
+
+        date = _convert_date_dmy(date_raw)
+
+        # Crédit = inflow (positive), Débit = outflow (already negative in file)
+        credit_str = (row.get("Crédit en CHF") or "").strip()
+        debit_str = (row.get("Débit en CHF") or "").strip()
+        inflow = float(credit_str) if credit_str else None
+        outflow = abs(float(debit_str)) if debit_str else None
+
+        label = (row.get("Label") or "").strip()
+        source_category = (
+            row.get("Catégorie") or row.get("Categorie") or ""
+        ).strip()
+
+        transactions.append(CSVTransaction(
+            date=date,
+            memo=memo,
+            inflow=inflow,
+            outflow=outflow,
+            label=label,
+            source_category=source_category,
+        ))
+
+    return transactions
+
+
+def _parse_generic(file_content: str) -> List[CSVTransaction]:
+    """
+    Parse a generic bank CSV with columns: Date, Memo, Inflow, Outflow, Label, Catégorie.
     """
     reader = csv.DictReader(io.StringIO(file_content))
     transactions = []
@@ -76,7 +148,6 @@ def parse_csv(file_content: str) -> List[CSVTransaction]:
         outflow = float(outflow_str) if outflow_str else None
 
         label = (row.get("Label") or "").strip()
-        # Handle the accented header "Catégorie"
         source_category = (
             row.get("Catégorie") or row.get("Categorie") or row.get("Category") or ""
         ).strip()
@@ -91,6 +162,16 @@ def parse_csv(file_content: str) -> List[CSVTransaction]:
         ))
 
     return transactions
+
+
+def parse_csv(file_content: str) -> List[CSVTransaction]:
+    """
+    Auto-detect CSV format and parse accordingly.
+    Supports PostFinance exports and generic bank CSVs.
+    """
+    if _is_postfinance(file_content):
+        return _parse_postfinance(file_content)
+    return _parse_generic(file_content)
 
 
 def bulk_predict(
