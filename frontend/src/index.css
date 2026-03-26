@@ -363,6 +363,21 @@ h3 { font-size: 1.125rem; }
   to   { background: transparent; }
 }
 
+.row-selected td {
+  background: rgba(99, 179, 237, 0.08);
+  border-color: rgba(99, 179, 237, 0.15);
+}
+
+.cell-editable {
+  cursor: text;
+  border-radius: var(--radius-sm);
+}
+
+.cell-editable:hover {
+  outline: 1px dashed rgba(99, 179, 237, 0.4);
+  outline-offset: -1px;
+}
+
 .row-changed td {
   animation: rowHighlight 1.5s ease forwards;
 }

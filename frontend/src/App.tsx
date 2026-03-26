@@ -103,7 +103,7 @@ function AppContent() {
         amount: r.amount,
         payee_name: r.editedPayee,
         category_name: r.editedCategory,
-        memo: r.original_memo,
+        memo: r.editedMemo || r.original_memo,
         account_id: selectedAccountId,
         flag_color: r.flagColor || undefined,
       }));
@@ -158,6 +158,7 @@ function AppContent() {
         status: update.status ?? row.status,
         edited_payee: update.editedPayee ?? row.editedPayee,
         edited_category: update.editedCategory ?? row.editedCategory,
+        edited_memo: update.editedMemo ?? row.editedMemo ?? '',
         flag_color: update.flagColor ?? row.flagColor ?? '',
       }]).catch(() => {});
       return next;

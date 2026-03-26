@@ -255,6 +255,7 @@ def _batch_rows_to_dicts(rows: list) -> list:
             "status": r.status,
             "edited_payee": r.edited_payee,
             "edited_category": r.edited_category,
+            "edited_memo": r.edited_memo,
             "flag_color": r.flag_color,
         }
         for r in sorted(rows, key=lambda r: r.row_index)
@@ -407,6 +408,7 @@ class ImportRowUpdate(BaseModel):
     status: Optional[str] = None
     edited_payee: Optional[str] = None
     edited_category: Optional[str] = None
+    edited_memo: Optional[str] = None
     flag_color: Optional[str] = None
 
 class ImportRowsUpdateRequest(BaseModel):
@@ -426,6 +428,8 @@ def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_d
             row.edited_payee = u.edited_payee
         if u.edited_category is not None:
             row.edited_category = u.edited_category
+        if u.edited_memo is not None:
+            row.edited_memo = u.edited_memo
         if u.flag_color is not None:
             row.flag_color = u.flag_color
         updated += 1
