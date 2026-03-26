@@ -4,7 +4,7 @@ import type { PredictionRow, ImportRowData, CategoryGroup, PayeeItem } from '../
 import { CategoryPicker, PayeePicker } from './SearchablePicker';
 import {
   CheckCircle, AlertTriangle, HelpCircle, Zap, Clock, Brain,
-  Check, X, Eye, EyeOff, Filter, CheckCheck, Pencil, Search,
+  Check, X, Eye, EyeOff, Filter, CheckCheck, Search,
   ArrowUp, ArrowDown, ArrowUpDown, Flag,
 } from 'lucide-react';
 
@@ -18,6 +18,7 @@ export interface ReviewedRow extends PredictionRow {
   status: ReviewStatus;
   editedPayee: string;
   editedCategory: string;
+  editedMemo: string;
   flagColor: FlagColor;
 }
 
@@ -28,6 +29,7 @@ export function toReviewedRows(predictions: ImportRowData[]): ReviewedRow[] {
     status: (p.status as ReviewStatus) || (p.review_required ? 'pending' : 'accepted'),
     editedPayee: p.edited_payee ?? p.payee ?? '',
     editedCategory: p.edited_category ?? p.category ?? '',
+    editedMemo: p.edited_memo || '',
     flagColor: (p.flag_color || '') as FlagColor,
   }));
 }
@@ -164,12 +166,14 @@ interface Props {
 
 type SortKey = 'date' | 'memo' | 'amount' | 'payee' | 'category' | 'source_category' | 'source' | 'confidence' | 'status';
 type SortDir = 'asc' | 'desc';
+type EditableField = 'memo' | 'payee' | 'category';
 
 export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow, onBulkAction, onCreateRule, changedRows }: Props) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [editingRow, setEditingRow] = useState<number | null>(null);
+  const [selectedRow, setSelectedRow] = useState<number | null>(null);
+  const [editingCell, setEditingCell] = useState<{ row: number; field: EditableField } | null>(null);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>('asc');
 
@@ -380,15 +384,42 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
           </thead>
           <tbody>
             {filtered.map(({ row, originalIndex }) => {
-              const isEditing = editingRow === originalIndex;
+              const isSelected = selectedRow === originalIndex;
+              const isEditingField = (field: EditableField) =>
+                editingCell?.row === originalIndex && editingCell?.field === field;
+
+              const handleRowClick = (e: React.MouseEvent) => {
+                // Don't select row when clicking on interactive elements
+                const target = e.target as HTMLElement;
+                if (target.closest('input, button, select, [role="listbox"]')) return;
+                if (selectedRow !== originalIndex) {
+                  setSelectedRow(originalIndex);
+                  setEditingCell(null);
+                }
+              };
+
+              const handleCellClick = (field: EditableField, e: React.MouseEvent) => {
+                e.stopPropagation();
+                if (isSelected) {
+                  setEditingCell({ row: originalIndex, field });
+                } else {
+                  setSelectedRow(originalIndex);
+                  setEditingCell(null);
+                }
+              };
+
+              const displayMemo = row.editedMemo || row.original_memo;
+
               return (
                 <tr
                   key={originalIndex}
-                  className={`animate-in${changedRows?.has(row.row_index) ? ' row-changed' : ''}`}
+                  className={`animate-in${changedRows?.has(row.row_index) ? ' row-changed' : ''}${isSelected ? ' row-selected' : ''}`}
                   style={{
                     opacity: row.status === 'ignored' ? 0.4 : 1,
                     animationDelay: `${(originalIndex % 30) * 15}ms`,
+                    cursor: 'pointer',
                   }}
+                  onClick={handleRowClick}
                 >
                   {/* Checkbox */}
                   <td>
@@ -411,9 +442,35 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                   {/* Date */}
                   <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>{row.date}</td>
 
-                  {/* Memo */}
-                  <td className="no-truncate" title={row.original_memo}>
-                    {row.merchant_stem || row.cleaned_memo}
+                  {/* Memo — editable */}
+                  <td
+                    className={`no-truncate${isSelected && !isEditingField('memo') ? ' cell-editable' : ''}`}
+                    title={row.original_memo}
+                    onClick={(e) => handleCellClick('memo', e)}
+                  >
+                    {isEditingField('memo') ? (
+                      <input
+                        type="text"
+                        autoFocus
+                        defaultValue={displayMemo}
+                        onBlur={(e) => {
+                          onUpdateRow(originalIndex, { editedMemo: e.target.value });
+                          setEditingCell(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                          if (e.key === 'Escape') { setEditingCell(null); }
+                        }}
+                        style={{
+                          width: '100%', padding: '2px 4px',
+                          background: 'var(--bg-surface)', border: '1px solid var(--accent)',
+                          borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
+                          fontFamily: 'inherit', fontSize: 'inherit', outline: 'none',
+                        }}
+                      />
+                    ) : (
+                      <span>{displayMemo}</span>
+                    )}
                   </td>
 
                   {/* Amount */}
@@ -422,12 +479,15 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                   </td>
 
                   {/* Payee — editable */}
-                  <td className="no-truncate">
-                    {isEditing ? (
+                  <td
+                    className={`no-truncate${isSelected && !isEditingField('payee') ? ' cell-editable' : ''}`}
+                    onClick={(e) => handleCellClick('payee', e)}
+                  >
+                    {isEditingField('payee') ? (
                       <PayeePicker
                         value={row.editedPayee}
                         items={payees}
-                        onChange={(name) => onUpdateRow(originalIndex, { editedPayee: name })}
+                        onChange={(name) => { onUpdateRow(originalIndex, { editedPayee: name }); setEditingCell(null); }}
                       />
                     ) : (
                       <span style={{ color: row.editedPayee ? 'var(--text-primary)' : 'var(--text-muted)' }}>
@@ -436,13 +496,16 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                     )}
                   </td>
 
-                  {/* Category — editable (select from existing) */}
-                  <td className="no-truncate">
-                    {isEditing ? (
+                  {/* Category — editable */}
+                  <td
+                    className={`no-truncate${isSelected && !isEditingField('category') ? ' cell-editable' : ''}`}
+                    onClick={(e) => handleCellClick('category', e)}
+                  >
+                    {isEditingField('category') ? (
                       <CategoryPicker
                         value={row.editedCategory}
                         groups={categoryGroups}
-                        onChange={(name) => onUpdateRow(originalIndex, { editedCategory: name })}
+                        onChange={(name) => { onUpdateRow(originalIndex, { editedCategory: name }); setEditingCell(null); }}
                       />
                     ) : (
                       <span style={{ color: row.editedCategory ? 'var(--text-primary)' : 'var(--text-muted)' }}>
@@ -502,25 +565,6 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                           title="Create rule from this correction"
                         >
                           <Zap size={14} color="var(--accent-light)" />
-                        </button>
-                      )}
-                      {isEditing ? (
-                        <button
-                          className="btn btn-ghost"
-                          style={{ padding: '4px 8px' }}
-                          onClick={() => setEditingRow(null)}
-                          title="Done editing"
-                        >
-                          <CheckCheck size={14} color="var(--accent)" />
-                        </button>
-                      ) : (
-                        <button
-                          className="btn btn-ghost"
-                          style={{ padding: '4px 8px' }}
-                          onClick={() => setEditingRow(originalIndex)}
-                          title="Edit payee/category"
-                        >
-                          <Pencil size={14} />
                         </button>
                       )}
                       {row.status !== 'accepted' && (

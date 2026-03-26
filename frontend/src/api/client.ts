@@ -47,6 +47,7 @@ export interface ImportRowData extends PredictionRow {
   status: string;
   edited_payee: string;
   edited_category: string;
+  edited_memo: string;
   flag_color: string;
 }
 
@@ -104,6 +105,7 @@ export interface ImportRowUpdate {
   status?: string;
   edited_payee?: string;
   edited_category?: string;
+  edited_memo?: string;
   flag_color?: string;
 }
 

@@ -138,6 +138,7 @@ class ImportRow(Base):
     status = Column(String, nullable=False, default="pending")  # pending | accepted | ignored
     edited_payee = Column(String, nullable=False, default="")
     edited_category = Column(String, nullable=False, default="")
+    edited_memo = Column(String, nullable=False, default="")
     flag_color = Column(String, nullable=False, default="")
 
     batch = relationship("ImportBatch", back_populates="rows")
