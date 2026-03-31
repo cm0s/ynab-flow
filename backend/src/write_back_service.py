@@ -14,7 +14,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 from src.ynab_client import YnabClient, YNABAPIError
-from src.models import Plan, Account, Category, Payee
+from src.models import Plan, Account, Category, CategoryGroup, Payee
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +258,11 @@ class WriteBackService:
         cat = (
             self.db.query(Category)
             .join(Category.category_group)
-            .filter(Category.name == category_name, Category.deleted == False)
+            .filter(
+                CategoryGroup.plan_id == plan_id,
+                Category.name == category_name,
+                Category.deleted == False,
+            )
             .first()
         )
         return cat.ynab_category_id if cat else None

@@ -397,7 +397,7 @@ function AppContent() {
         {view === 'review' && (
           <section className="animate-in">
             <h2 style={{ marginBottom: 16 }}>Review Transactions</h2>
-            <StatsBar predictions={predictions} />
+            <StatsBar predictions={predictions} reviewRows={reviewRows} />
             <ReviewTable
               rows={reviewRows}
               categoryGroups={categoryGroups}
