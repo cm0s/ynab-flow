@@ -135,10 +135,9 @@ class WriteBackService:
             else:
                 ynab_txn["payee_name"] = txn.payee_name
 
-            # Resolve category to YNAB ID if possible
-            cat_id = self._resolve_category_id(plan.id, txn.category_name)
-            if cat_id:
-                ynab_txn["category_id"] = cat_id
+            # Resolve category to YNAB ID; explicitly set null to prevent
+            # YNAB from auto-assigning based on payee history
+            ynab_txn["category_id"] = self._resolve_category_id(plan.id, txn.category_name)
 
             ynab_txns.append(ynab_txn)
             payload_indices.append(idx)
