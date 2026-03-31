@@ -59,7 +59,7 @@ export function CategoryPicker({
         onFocus={() => setOpen(true)}
         placeholder={value || 'Search category\u2026'}
         style={inputStyle ?? {
-          width: 160, padding: '4px 6px', background: 'var(--bg-secondary)',
+          width: '100%', boxSizing: 'border-box', padding: '4px 6px', background: 'var(--bg-secondary)',
           border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)',
           color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: '0.8rem',
         }}
@@ -156,6 +156,16 @@ export function PayeePicker({
     ? items.filter((p) => p.name.toLowerCase().includes(q))
     : items;
   const display = filtered.slice(0, 50); // cap for performance
+  const exactMatch = q && items.some((p) => p.name.toLowerCase() === q);
+
+  const submitQuery = () => {
+    const trimmed = query.trim();
+    if (trimmed) {
+      onChange(trimmed);
+      setOpen(false);
+      setQuery('');
+    }
+  };
 
   return (
     <>
@@ -164,9 +174,14 @@ export function PayeePicker({
         value={query}
         onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}
+        onBlur={() => { if (query.trim()) submitQuery(); }}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); submitQuery(); }
+          if (e.key === 'Escape') { setOpen(false); setQuery(''); }
+        }}
         placeholder={value || 'Search payee\u2026'}
         style={inputStyle ?? {
-          width: 160, padding: '4px 6px', background: 'var(--bg-secondary)',
+          width: '100%', boxSizing: 'border-box', padding: '4px 6px', background: 'var(--bg-secondary)',
           border: '1px solid var(--accent)', borderRadius: 'var(--radius-sm)',
           color: 'var(--text-primary)', fontFamily: 'inherit', fontSize: '0.8rem',
         }}
@@ -181,9 +196,17 @@ export function PayeePicker({
             borderRadius: 'var(--radius-md)', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
           }}
         >
-          {display.length === 0 && (
-            <div style={{ padding: '8px 12px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-              No payees found
+          {q && !exactMatch && (
+            <div
+              onMouseDown={(e) => { e.preventDefault(); submitQuery(); }}
+              style={{
+                padding: '6px 12px', fontSize: '0.8rem', cursor: 'pointer',
+                color: 'var(--accent)', borderBottom: '1px solid var(--border)',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-surface)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              Use "{query.trim()}"
             </div>
           )}
           {display.map((p) => (
@@ -201,6 +224,7 @@ export function PayeePicker({
               {p.name}
             </div>
           ))}
+          {display.length === 0 && exactMatch && null}
           {filtered.length > 50 && (
             <div style={{ padding: '6px 12px', fontSize: '0.75rem', color: 'var(--text-muted)', textAlign: 'center' }}>
               {filtered.length - 50} more — type to narrow results
