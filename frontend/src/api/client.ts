@@ -1,11 +1,21 @@
-/** API client — all calls go through the Vite proxy at /api */
+/** API client — uses Vite proxy in dev, direct URL in production */
 
-const BASE = '/api';
+import { supabase } from '../lib/supabase';
+
+const BASE = import.meta.env.VITE_API_URL || '/api';
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  if (!supabase) return {};
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session?.access_token) return {};
+  return { Authorization: `Bearer ${session.access_token}` };
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const authHeaders = await getAuthHeaders();
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
+    headers: { 'Content-Type': 'application/json', ...authHeaders, ...init?.headers },
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -60,9 +70,11 @@ export interface UploadResult {
 export async function uploadCSV(planId: string, file: File): Promise<UploadResult> {
   const form = new FormData();
   form.append('file', file);
+  const authHeaders = await getAuthHeaders();
   const res = await fetch(`${BASE}/upload-csv?plan_id=${planId}`, {
     method: 'POST',
     body: form,
+    headers: authHeaders,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

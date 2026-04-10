@@ -2,6 +2,7 @@ import os
 from dataclasses import asdict
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
 
@@ -18,8 +19,38 @@ from src.csv_service import CSVTransaction, parse_csv, bulk_predict
 from src.write_back_service import WriteBackService, WriteTransaction
 from src.transfer_detector import detect_transfer
 from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow
+from src.auth import verify_token
 
 app = FastAPI(title="YNAB Flow API")
+
+# CORS — allow frontend origins
+allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+def auto_train_models():
+    """Train ML models on startup if they don't exist and data is available."""
+    from src.ml_classifier import PAYEE_MODEL_PATH, CATEGORY_MODEL_PATH
+    if PAYEE_MODEL_PATH.exists() and CATEGORY_MODEL_PATH.exists():
+        return
+    from src.database import SessionLocal
+    db = SessionLocal()
+    try:
+        plan = db.query(Plan).first()
+        if plan:
+            classifier = MLClassifier()
+            classifier.train(db, plan.id)
+    except Exception as e:
+        print(f"Auto-train skipped: {e}")
+    finally:
+        db.close()
+
 
 def get_ynab_client():
     api_key = os.environ.get("YNAB_API_KEY")
@@ -34,7 +65,8 @@ def health_check():
 @app.post("/sync/budgets")
 def sync_budgets(
     db: Session = Depends(get_db),
-    client: YnabClient = Depends(get_ynab_client)
+    client: YnabClient = Depends(get_ynab_client),
+    _user: str = Depends(verify_token),
 ):
     """Fetch and upsert basic budget and account structures."""
     try:
@@ -49,7 +81,8 @@ def sync_plan_data(
     plan_id: str,
     full: bool = Query(False, description="Reset knowledge and re-fetch everything"),
     db: Session = Depends(get_db),
-    client: YnabClient = Depends(get_ynab_client)
+    client: YnabClient = Depends(get_ynab_client),
+    _user: str = Depends(verify_token),
 ):
     """Fetch delta updates for Categories, Payees, and Transactions for a specific plan."""
     plan = db.query(Plan).filter(Plan.id == plan_id).first()
@@ -104,7 +137,7 @@ class RuleCreate(BaseModel):
 # ---------------------------------------------------------------------------
 
 @app.post("/normalize")
-def normalize_memo(req: NormalizeRequest):
+def normalize_memo(req: NormalizeRequest, _user: str = Depends(verify_token)):
     """Normalize a raw bank memo (FR-3)."""
     result = normalize(req.memo)
     return {
@@ -114,7 +147,7 @@ def normalize_memo(req: NormalizeRequest):
     }
 
 @app.post("/classify")
-def classify_transaction(req: ClassifyRequest, db: Session = Depends(get_db)):
+def classify_transaction(req: ClassifyRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Normalize a memo and run it through the rule engine (FR-3 + FR-4)."""
     norm = normalize(req.memo)
     engine = RuleEngine(db, req.plan_id)
@@ -136,7 +169,7 @@ def classify_transaction(req: ClassifyRequest, db: Session = Depends(get_db)):
     }
 
 @app.get("/rules")
-def list_rules(plan_id: str, db: Session = Depends(get_db)):
+def list_rules(plan_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """List all rules for a plan, ordered by priority."""
     rules = (
         db.query(Rule)
@@ -155,7 +188,7 @@ def list_rules(plan_id: str, db: Session = Depends(get_db)):
     ]
 
 @app.post("/rules")
-def create_rule(req: RuleCreate, db: Session = Depends(get_db)):
+def create_rule(req: RuleCreate, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Create a new deterministic rule."""
     rule = Rule(
         plan_id=req.plan_id,
@@ -190,7 +223,7 @@ class PredictRequest(BaseModel):
     category_name: str = ""
 
 @app.post("/predict")
-def predict_transaction(req: PredictRequest, db: Session = Depends(get_db)):
+def predict_transaction(req: PredictRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Full prediction orchestration (FR-7)."""
     plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
     if not plan:
@@ -218,7 +251,7 @@ def predict_transaction(req: PredictRequest, db: Session = Depends(get_db)):
     }
 
 @app.post("/train")
-def train_models(plan_id: str, db: Session = Depends(get_db)):
+def train_models(plan_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Train ML models from historical YNAB transactions (FR-6.4)."""
     plan = db.query(Plan).filter(Plan.id == plan_id).first()
     if not plan:
@@ -267,6 +300,7 @@ async def upload_csv(
     plan_id: str = Query(...),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    _user: str = Depends(verify_token),
 ):
     """Upload a bank CSV and get bulk predictions, persisted as an import batch."""
     plan = db.query(Plan).filter(Plan.id == plan_id).first()
@@ -323,7 +357,7 @@ class ReclassifyRequest(BaseModel):
     batch_id: Optional[str] = None
 
 @app.post("/reclassify")
-def reclassify(req: ReclassifyRequest, db: Session = Depends(get_db)):
+def reclassify(req: ReclassifyRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Re-run classification on a persisted import batch."""
     plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
     if not plan:
@@ -388,7 +422,7 @@ def reclassify(req: ReclassifyRequest, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @app.get("/import-batches/{plan_id}/active")
-def get_active_batch(plan_id: str, db: Session = Depends(get_db)):
+def get_active_batch(plan_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Return the active import batch for a plan, or 404."""
     batch = db.query(ImportBatch).filter(
         ImportBatch.plan_id == plan_id, ImportBatch.status == "active"
@@ -415,7 +449,7 @@ class ImportRowsUpdateRequest(BaseModel):
     updates: List[ImportRowUpdate]
 
 @app.patch("/import-rows")
-def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_db)):
+def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Bulk-save review state changes on import rows."""
     updated = 0
     for u in req.updates:
@@ -438,7 +472,7 @@ def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_d
 
 
 @app.post("/import-batches/{batch_id}/complete")
-def complete_batch(batch_id: str, db: Session = Depends(get_db)):
+def complete_batch(batch_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Mark an import batch as completed."""
     batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
     if not batch:
@@ -449,7 +483,7 @@ def complete_batch(batch_id: str, db: Session = Depends(get_db)):
 
 
 @app.put("/rules/{rule_id}")
-def update_rule(rule_id: str, req: RuleCreate, db: Session = Depends(get_db)):
+def update_rule(rule_id: str, req: RuleCreate, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Update an existing rule."""
     rule = db.query(Rule).filter(Rule.id == rule_id).first()
     if not rule:
@@ -465,7 +499,7 @@ def update_rule(rule_id: str, req: RuleCreate, db: Session = Depends(get_db)):
 
 
 @app.delete("/rules/{rule_id}")
-def delete_rule(rule_id: str, db: Session = Depends(get_db)):
+def delete_rule(rule_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Delete a rule."""
     rule = db.query(Rule).filter(Rule.id == rule_id).first()
     if not rule:
@@ -476,7 +510,7 @@ def delete_rule(rule_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/plans")
-def list_plans(db: Session = Depends(get_db)):
+def list_plans(db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """List all synced plans, ordered by transaction count (most data first)."""
     from sqlalchemy import func
     plans = (
@@ -493,7 +527,7 @@ def list_plans(db: Session = Depends(get_db)):
 
 
 @app.get("/plans/{plan_id}/accounts")
-def list_accounts(plan_id: str, db: Session = Depends(get_db)):
+def list_accounts(plan_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """List accounts for a plan."""
     accounts = db.query(Account).filter(Account.plan_id == plan_id).all()
     return [
@@ -503,7 +537,7 @@ def list_accounts(plan_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/plans/{plan_id}/categories")
-def list_categories(plan_id: str, db: Session = Depends(get_db)):
+def list_categories(plan_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """List category groups and categories for a plan."""
     groups = db.query(CategoryGroup).filter(CategoryGroup.plan_id == plan_id).all()
     return [
@@ -519,7 +553,7 @@ def list_categories(plan_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/plans/{plan_id}/payees")
-def list_payees(plan_id: str, db: Session = Depends(get_db)):
+def list_payees(plan_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """List payees for a plan."""
     payees = db.query(Payee).filter(
         Payee.plan_id == plan_id, Payee.deleted == False
@@ -548,7 +582,7 @@ class WriteBackRequest(BaseModel):
     batch_id: Optional[str] = None
 
 @app.post("/write-back")
-def write_back(req: WriteBackRequest, db: Session = Depends(get_db)):
+def write_back(req: WriteBackRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """Push approved transactions to YNAB (FR-9)."""
     plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
     if not plan:
@@ -603,7 +637,7 @@ def write_back(req: WriteBackRequest, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 
 @app.post("/detect-transfer")
-def detect_transfer_endpoint(memo: str, source_category: str = "", payee: str = "", amount: float = 0.0):
+def detect_transfer_endpoint(memo: str, source_category: str = "", payee: str = "", amount: float = 0.0, _user: str = Depends(verify_token)):
     """Detect if a transaction is likely a transfer (FR-11)."""
     result = detect_transfer(memo, source_category, payee, amount)
     return {
@@ -614,7 +648,7 @@ def detect_transfer_endpoint(memo: str, source_category: str = "", payee: str = 
 
 
 @app.get("/metrics")
-def get_metrics(plan_id: str, db: Session = Depends(get_db)):
+def get_metrics(plan_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
     """FR-14: User-facing operational metrics."""
     plan = db.query(Plan).filter(Plan.id == plan_id).first()
     if not plan:
@@ -655,7 +689,7 @@ class ExportRequest(BaseModel):
     export_type: str = "ynab"  # "ynab" | "review" | "unresolved" | "audit"
 
 @app.post("/export")
-def export_csv(req: ExportRequest):
+def export_csv(req: ExportRequest, _user: str = Depends(verify_token)):
     """FR-10.1: Generate various export artifacts."""
     import json
 

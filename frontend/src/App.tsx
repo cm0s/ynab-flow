@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { useQuery, useMutation, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
-  CheckCircle, AlertCircle, XCircle, Settings, BarChart3,
+  CheckCircle, AlertCircle, XCircle, Settings, BarChart3, LogOut,
 } from 'lucide-react';
 import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, fetchPayees, writeBack, createRule, reclassify, fetchActiveBatch, updateImportRows, completeBatch } from './api/client';
 import type { Plan, ImportRowData, Account, CategoryGroup, PayeeItem, WriteBackResponse } from './api/client';
@@ -11,12 +11,15 @@ import StatsBar from './components/StatsBar';
 import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
 import SettingsPage from './components/SettingsPage';
 import MetricsDashboard from './components/MetricsDashboard';
+import LoginPage from './components/LoginPage';
+import { supabase } from './lib/supabase';
+import type { Session } from '@supabase/supabase-js';
 
 const queryClient = new QueryClient();
 
 type View = 'import' | 'review' | 'push' | 'settings' | 'dashboard';
 
-function AppContent() {
+function AppContent({ onLogout }: { onLogout?: () => void }) {
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
   const [batchId, setBatchId] = useState<string | null>(null);
   const [predictions, setPredictions] = useState<ImportRowData[]>([]);
@@ -328,6 +331,11 @@ function AppContent() {
           >
             <Settings size={18} />
           </button>
+          {onLogout && (
+            <button className="btn btn-ghost" onClick={onLogout} title="Sign out">
+              <LogOut size={18} />
+            </button>
+          )}
         </div>
       </header>
 
@@ -553,9 +561,44 @@ function AppContent() {
 }
 
 export default function App() {
+  const [session, setSession] = useState<Session | null>(null);
+  const [authLoading, setAuthLoading] = useState(!!supabase);
+
+  useEffect(() => {
+    if (!supabase) {
+      // No Supabase configured (local dev) — skip auth
+      setAuthLoading(false);
+      return;
+    }
+
+    supabase.auth.getSession().then(({ data: { session: s } }) => {
+      setSession(s);
+      setAuthLoading(false);
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+      setSession(s);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  if (authLoading) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg-base)' }}>
+        <Loader2 size={32} className="loading-pulse" style={{ color: 'var(--accent)' }} />
+      </div>
+    );
+  }
+
+  // Require auth when Supabase is configured
+  if (supabase && !session) {
+    return <LoginPage onLogin={() => {}} />;
+  }
+
   return (
     <QueryClientProvider client={queryClient}>
-      <AppContent />
+      <AppContent onLogout={supabase ? () => { supabase!.auth.signOut(); } : undefined} />
     </QueryClientProvider>
   );
 }
