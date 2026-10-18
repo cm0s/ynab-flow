@@ -168,3 +168,13 @@ class Rule(Base):
     flag_ignore = Column(Boolean, default=False)
 
     plan = relationship("Plan")
+
+
+class SyncJob(Base):
+    __tablename__ = 'sync_jobs'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    plan_id = Column(String, ForeignKey('plans.id'), unique=True, nullable=False)
+    status = Column(String, nullable=False)
+    message = Column(String, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
