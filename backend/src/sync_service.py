@@ -99,9 +99,10 @@ class SyncService:
          server_knowledge = int(plan.last_knowledge_payees) if plan.last_knowledge_payees else 0
          data = self.client.get_payees(plan.ynab_plan_id, last_knowledge_of_server=server_knowledge)
          
+         payees = {p.ynab_payee_id: p for p in self.db.query(Payee).filter(Payee.plan_id == plan.id).all()}
          for payee_data in data.get("payees", []):
              ynab_payee_id = payee_data.get("id")
-             payee = self.db.query(Payee).filter(Payee.ynab_payee_id == ynab_payee_id).first()
+             payee = payees.get(ynab_payee_id)
              
              if not payee:
                  payee = Payee(
@@ -112,6 +113,7 @@ class SyncService:
                      deleted=payee_data.get("deleted", False)
                  )
                  self.db.add(payee)
+                 payees[ynab_payee_id] = payee
              else:
                  payee.name = payee_data.get("name")
                  payee.transfer_account_id = payee_data.get("transfer_account_id")
@@ -128,33 +130,26 @@ class SyncService:
         server_knowledge = int(plan.last_knowledge_transactions) if plan.last_knowledge_transactions else 0
         data = self.client.get_transactions(plan.ynab_plan_id, last_knowledge_of_server=server_knowledge)
 
+        # Cache references to avoid remote database round trips for every row.
+        accounts = {a.ynab_account_id: a.id for a in self.db.query(Account).filter(Account.plan_id == plan.id).all()}
+        payees = {p.ynab_payee_id: p.id for p in self.db.query(Payee).filter(Payee.plan_id == plan.id).all()}
+        categories = {c.ynab_category_id: c.id for c in self.db.query(Category).join(CategoryGroup).filter(CategoryGroup.plan_id == plan.id).all()}
+        transactions = {t.ynab_transaction_id: t for t in self.db.query(Transaction).filter(Transaction.plan_id == plan.id).all()}
+
         for txn_data in data.get("transactions", []):
              ynab_txn_id = txn_data.get("id")
              
-             # Resolve internal FKs
-             ynab_account_id = txn_data.get("account_id")
-             account = self.db.query(Account).filter(Account.ynab_account_id == ynab_account_id).first()
-             if not account:
-                 continue # Data inconsistency or skipped account
-                 
-             ynab_payee_id = txn_data.get("payee_id")
-             payee_id = None
-             if ynab_payee_id:
-                  payee = self.db.query(Payee).filter(Payee.ynab_payee_id == ynab_payee_id).first()
-                  payee_id = payee.id if payee else None
-                  
-             ynab_category_id = txn_data.get("category_id")
-             category_id = None
-             if ynab_category_id:
-                  category = self.db.query(Category).filter(Category.ynab_category_id == ynab_category_id).first()
-                  category_id = category.id if category else None
+             account_id = accounts.get(txn_data.get("account_id"))
+             if not account_id:
+                 continue  # Data inconsistency or skipped account
+             payee_id = payees.get(txn_data.get("payee_id"))
+             category_id = categories.get(txn_data.get("category_id"))
+             txn = transactions.get(ynab_txn_id)
 
-             txn = self.db.query(Transaction).filter(Transaction.ynab_transaction_id == ynab_txn_id).first()
-             
              if not txn:
                   txn = Transaction(
                       plan_id=plan.id,
-                      account_id=account.id,
+                      account_id=account_id,
                       payee_id=payee_id,
                       category_id=category_id,
                       ynab_transaction_id=ynab_txn_id,
@@ -166,8 +161,9 @@ class SyncService:
                       deleted=txn_data.get("deleted", False)
                   )
                   self.db.add(txn)
+                  transactions[ynab_txn_id] = txn
              else:
-                  txn.account_id = account.id
+                  txn.account_id = account_id
                   txn.payee_id = payee_id
                   txn.category_id = category_id
                   txn.date = txn_data.get("date")

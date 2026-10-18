@@ -158,3 +158,42 @@ def test_sync_payees_stores_transfer_account_id(service, db):
     transfer = db.query(Payee).filter(Payee.ynab_payee_id == "payee-transfer").first()
     assert transfer is not None
     assert transfer.transfer_account_id == "acc-wise-123"
+
+
+@respx.mock
+def test_transaction_sync_uses_constant_lookups_and_upserts(service, db):
+    from sqlalchemy import event
+
+    plan = Plan(ynab_plan_id="budget-1", name="Budget")
+    db.add(plan)
+    db.flush()
+    account = Account(plan_id=plan.id, ynab_account_id="acc-1", name="Bank", type="checking")
+    db.add(account)
+    db.commit()
+    rows = [dict(id=f"txn-{i}", account_id="acc-1", date="2026-01-15",
+                 amount=-1000, memo="Original", cleared="cleared") for i in range(100)]
+    route = respx.get("https://api.ynab.com/v1/budgets/budget-1/transactions")
+    route.mock(return_value=Response(200, json={"data": {"transactions": rows, "server_knowledge": 10}}))
+    selects = []
+
+    def record_select(conn, cursor, statement, parameters, context, executemany):
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(engine, "before_cursor_execute", record_select)
+    try:
+        service.sync_transactions(plan)
+        assert len(selects) <= 6
+    finally:
+        event.remove(engine, "before_cursor_execute", record_select)
+    assert db.query(Transaction).count() == 100
+    txn = db.query(Transaction).filter_by(ynab_transaction_id="txn-0").one()
+    assert txn.account_id == account.id
+    rows[0].update(memo="Updated", deleted=True)
+    rows.append(dict(id="missing-account", account_id="unknown", date="2026-01-15", amount=0))
+    route.mock(return_value=Response(200, json={"data": {"transactions": rows, "server_knowledge": 20}}))
+    service.sync_transactions(plan)
+    assert db.query(Transaction).count() == 100
+    assert txn.memo == "Updated"
+    assert txn.deleted is True
+    assert plan.last_knowledge_transactions == "20"

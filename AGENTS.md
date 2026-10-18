@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Rules
-- Ask user for confirmation before committing using an available interactive yes/no prompt. Never commit automatically.
+- After completing a feature, bug fix, or similar task, propose making a commit and wait for the user to say whether they want to commit the changes. Never commit automatically.
 - Never commit `backend/.env` (contains `YNAB_API_KEY`).
 - Always run the full test suite (`pytest tests/ -v` and `pnpm run build`) after finishing a task.
 
