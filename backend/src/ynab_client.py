@@ -13,7 +13,7 @@ class YnabClient:
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json"
         }
-        self.client = httpx.Client(headers=self.headers, base_url=self.base_url)
+        self.client = httpx.Client(headers=self.headers, base_url=self.base_url, timeout=60.0)
 
     def _get(self, endpoint: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         response = self.client.get(endpoint, params=params)
@@ -59,3 +59,34 @@ class YnabClient:
         if last_knowledge_of_server is not None:
              params["last_knowledge_of_server"] = last_knowledge_of_server
         return self._get(f"/budgets/{budget_id}/transactions", params=params)
+
+    def _post(self, endpoint: str, json_body: Dict[str, Any]) -> Dict[str, Any]:
+        import logging
+        logger = logging.getLogger(__name__)
+        txn_count = len(json_body.get("transactions", []))
+        logger.info("POST %s (%d transactions)", endpoint, txn_count)
+        response = self.client.post(endpoint, json=json_body)
+        logger.info("POST %s completed: %d in %.1fs", endpoint, response.status_code, response.elapsed.total_seconds())
+
+        if response.status_code >= 400:
+            error_detail = response.text
+            try:
+                error_detail = response.json().get("error", {}).get("detail", error_detail)
+            except Exception:
+                pass
+            raise YNABAPIError(f"YNAB API Error ({response.status_code}): {error_detail}")
+
+        return response.json().get("data", {})
+
+    def create_transactions(self, budget_id: str, transactions: list) -> Dict[str, Any]:
+        """
+        Create one or more transactions in YNAB (FR-9.2).
+        
+        Each transaction dict should have:
+          account_id, date, amount (milliunits), payee_name, category_id (optional),
+          memo, cleared, import_id (for dedup).
+        """
+        return self._post(
+            f"/budgets/{budget_id}/transactions",
+            {"transactions": transactions},
+        )

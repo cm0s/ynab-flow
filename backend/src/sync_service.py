@@ -50,8 +50,7 @@ class SyncService:
 
     def sync_categories(self, plan: Plan):
         """Fetches category groups and categories, using delta sync if available."""
-        # Convert string to int if it exists
-        server_knowledge = int(plan.last_server_knowledge) if plan.last_server_knowledge else None
+        server_knowledge = int(plan.last_server_knowledge) if plan.last_server_knowledge else 0
         
         data = self.client.get_categories(plan.ynab_plan_id, last_knowledge_of_server=server_knowledge)
         groups = data.get("category_groups", [])
@@ -97,7 +96,7 @@ class SyncService:
 
     def sync_payees(self, plan: Plan):
          """Fetches payees, using delta sync"""
-         server_knowledge = int(plan.last_server_knowledge) if plan.last_server_knowledge else None
+         server_knowledge = int(plan.last_knowledge_payees) if plan.last_knowledge_payees else 0
          data = self.client.get_payees(plan.ynab_plan_id, last_knowledge_of_server=server_knowledge)
          
          for payee_data in data.get("payees", []):
@@ -109,22 +108,24 @@ class SyncService:
                      plan_id=plan.id,
                      ynab_payee_id=ynab_payee_id,
                      name=payee_data.get("name"),
+                     transfer_account_id=payee_data.get("transfer_account_id"),
                      deleted=payee_data.get("deleted", False)
                  )
                  self.db.add(payee)
              else:
                  payee.name = payee_data.get("name")
+                 payee.transfer_account_id = payee_data.get("transfer_account_id")
                  payee.deleted = payee_data.get("deleted", False)
                  
          new_knowledge = data.get("server_knowledge")
          if new_knowledge:
-             plan.last_server_knowledge = str(new_knowledge)
-             
+             plan.last_knowledge_payees = str(new_knowledge)
+
          self.db.commit()
 
     def sync_transactions(self, plan: Plan):
         """Fetches all transactions using delta sync"""
-        server_knowledge = int(plan.last_server_knowledge) if plan.last_server_knowledge else None
+        server_knowledge = int(plan.last_knowledge_transactions) if plan.last_knowledge_transactions else 0
         data = self.client.get_transactions(plan.ynab_plan_id, last_knowledge_of_server=server_knowledge)
 
         for txn_data in data.get("transactions", []):
@@ -178,8 +179,8 @@ class SyncService:
                   
         new_knowledge = data.get("server_knowledge")
         if new_knowledge:
-             plan.last_server_knowledge = str(new_knowledge)
-             
+             plan.last_knowledge_transactions = str(new_knowledge)
+
         self.db.commit()
 
     def sync_all(self, plan: Plan):
