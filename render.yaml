@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: ynab-flow
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn src.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: AUTH_REQUIRED
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: YNAB_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: ADMIN_USER_ID
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false

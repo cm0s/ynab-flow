@@ -16,6 +16,9 @@ if config.config_file_name is not None:
 
 import sys
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 sys.path.insert(0, os.path.realpath(os.path.join(os.path.dirname(__file__), '..')))
 from src.models import Base
@@ -27,7 +30,7 @@ database_url = os.environ.get("DATABASE_URL")
 if database_url:
     if database_url.startswith("postgres://"):
         database_url = database_url.replace("postgres://", "postgresql://", 1)
-    config.set_main_option("sqlalchemy.url", database_url)
+    config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 
 def run_migrations_offline() -> None:

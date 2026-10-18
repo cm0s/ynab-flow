@@ -19,12 +19,14 @@ from src.csv_service import CSVTransaction, parse_csv, bulk_predict
 from src.write_back_service import WriteBackService, WriteTransaction
 from src.transfer_detector import detect_transfer
 from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow
-from src.auth import verify_token
+from src.auth import verify_token, validate_auth_config
+
+validate_auth_config()
 
 app = FastAPI(title="YNAB Flow API")
 
 # CORS — allow frontend origins
-allowed_origins = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+allowed_origins = [origin.strip() for origin in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

@@ -577,7 +577,9 @@ export default function App() {
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, s) => {
+      if (!s) queryClient.clear();
       setSession(s);
+      setAuthLoading(false);
     });
 
     return () => subscription.unsubscribe();

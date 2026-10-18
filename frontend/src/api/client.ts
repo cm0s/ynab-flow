@@ -2,7 +2,7 @@
 
 import { supabase } from '../lib/supabase';
 
-const BASE = import.meta.env.VITE_API_URL || '/api';
+const BASE = (import.meta.env.VITE_API_URL || '/api').replace(/\/+$/, '');
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
   if (!supabase) return {};
