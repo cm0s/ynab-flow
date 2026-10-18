@@ -1,7 +1,7 @@
 """
 FR-6: ML Prediction Engine
 
-Lightweight TF-IDF + LogisticRegression classifier for payee and category.
+Memory-efficient TF-IDF + stochastic logistic regression classifier for payee and category.
 """
 
 import os
@@ -11,8 +11,9 @@ from typing import Optional, List, Tuple
 from pathlib import Path
 
 import joblib
+import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import SGDClassifier
 from sklearn.pipeline import Pipeline
 from sqlalchemy.orm import Session
 
@@ -39,7 +40,7 @@ class MLPrediction:
 
 class MLClassifier:
     """
-    Trains and predicts payee/category using TF-IDF + Logistic Regression.
+    Trains and predicts payee/category using TF-IDF + stochastic logistic regression.
     """
 
     def __init__(self):
@@ -53,55 +54,44 @@ class MLClassifier:
 
     def train(self, db: Session, plan_id: str) -> dict:
         """Train payee and category classifiers from historical YNAB transactions."""
-        txns = (
-            db.query(Transaction)
+        # Fetch only training columns; resolve labels in SQL rather than two
+        # remote queries per transaction or retaining full ORM objects.
+        rows = (
+            db.query(Transaction.memo, Payee.name, Category.name)
+            .outerjoin(Payee, Transaction.payee_id == Payee.id)
+            .outerjoin(Category, Transaction.category_id == Category.id)
             .filter(
                 Transaction.plan_id == plan_id,
                 Transaction.deleted == False,
                 Transaction.memo.isnot(None),
             )
-            .all()
+            .yield_per(1000)
         )
-
-        memos = []
-        payee_labels = []
-        category_labels = []
-
-        for txn in txns:
-            norm = normalize(txn.memo or "")
-            text = norm.cleaned_memo
+        payee_memos, payee_labels = [], []
+        category_memos, category_labels = [], []
+        training_rows = 0
+        for memo, payee_name, category_name in rows:
+            training_rows += 1
+            text = normalize(memo or "").cleaned_memo
             if not text:
                 continue
-
-            payee_name = self._resolve_name(db, Payee, txn.payee_id)
-            cat_name = self._resolve_name(db, Category, txn.category_id)
-
             if payee_name:
-                memos.append(text)
+                payee_memos.append(text)
                 payee_labels.append(payee_name)
+            if category_name:
+                category_memos.append(text)
+                category_labels.append(category_name)
 
-            if cat_name:
-                if len(memos) > len(category_labels):
-                    category_labels.append(cat_name)
-                else:
-                    # Separate entries for category-only
-                    memos.append(text)
-                    category_labels.append(cat_name)
-
-        stats = {"payee_trained": False, "category_trained": False, "training_rows": len(txns)}
-
-        # Need at least 2 distinct classes to train
+        stats = {"payee_trained": False, "category_trained": False, "training_rows": training_rows}
         if len(set(payee_labels)) >= 2:
             self.payee_pipeline = self._build_pipeline()
-            self.payee_pipeline.fit(memos[:len(payee_labels)], payee_labels)
+            self.payee_pipeline.fit(payee_memos, payee_labels)
             stats["payee_trained"] = True
             stats["payee_classes"] = len(set(payee_labels))
 
         if len(set(category_labels)) >= 2:
             self.category_pipeline = self._build_pipeline()
-            # Use the corresponding memos for category
-            cat_memos = memos[:len(category_labels)]
-            self.category_pipeline.fit(cat_memos, category_labels)
+            self.category_pipeline.fit(category_memos, category_labels)
             stats["category_trained"] = True
             stats["category_classes"] = len(set(category_labels))
 
@@ -154,11 +144,16 @@ class MLClassifier:
                 ngram_range=(2, 5),
                 max_features=10000,
                 sublinear_tf=True,
+                dtype=np.float32,
             )),
-            ("clf", LogisticRegression(
-                max_iter=1000,
-                solver="lbfgs",
-                C=1.0,
+            # Stochastic logistic regression keeps sparse float32 inputs and
+            # avoids L-BFGS optimizer history scaling with classes × features.
+            ("clf", SGDClassifier(
+                loss="log_loss",
+                max_iter=200,
+                tol=1e-3,
+                random_state=42,
+                n_jobs=1,
             )),
         ])
 

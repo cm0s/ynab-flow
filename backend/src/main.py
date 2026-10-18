@@ -1,4 +1,5 @@
 import os
+from threading import Lock
 from dataclasses import asdict
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query
@@ -24,6 +25,7 @@ from src.auth import verify_token, validate_auth_config
 validate_auth_config()
 
 app = FastAPI(title="YNAB Flow API")
+training_lock = Lock()
 
 # CORS — allow frontend origins
 allowed_origins = [origin.strip() for origin in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if origin.strip()]
@@ -288,9 +290,18 @@ def train_models(plan_id: str, db: Session = Depends(get_db), _user: str = Depen
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found.")
 
-    classifier = MLClassifier()
-    stats = classifier.train(db, plan_id)
-    return {"status": "success", **stats}
+    if not training_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Model training is already running. Please wait before retrying.")
+    try:
+        classifier = MLClassifier()
+        stats = classifier.train(db, plan_id)
+        if not stats["payee_trained"] and not stats["category_trained"]:
+            raise HTTPException(status_code=422, detail="Not enough labeled history to train. Sync transactions with at least two different payees or categories.")
+        return {"status": "success", **stats}
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Training could not use the available transaction memos. Check that your synced history contains meaningful text.") from error
+    finally:
+        training_lock.release()
 
 # ---------------------------------------------------------------------------
 # Phase 5 endpoints
