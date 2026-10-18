@@ -87,8 +87,20 @@ export async function uploadCSV(planId: string, file: File): Promise<UploadResul
 export const syncBudgets = () =>
   request<{ status: string }>('/sync/budgets', { method: 'POST' });
 
-export const syncPlanData = (planId: string, full = false) =>
-  request<{ status: string }>(`/sync/plan/${planId}${full ? '?full=true' : ''}`, { method: 'POST' });
+export async function syncPlanData(planId: string, full = false) {
+  const signal = AbortSignal.timeout(180_000);
+  try {
+    return await request<{ status: string }>(
+      `/sync/plan/${planId}${full ? '?full=true' : ''}`,
+      { method: 'POST', signal },
+    );
+  } catch (error) {
+    if (signal.aborted) {
+      throw new Error('Sync did not respond within 3 minutes. The server may still be syncing. Check your historical data before retrying.');
+    }
+    throw error;
+  }
+}
 
 export const trainModels = (planId: string) =>
   request<{ status: string }>(`/train?plan_id=${planId}`, { method: 'POST' });

@@ -39,6 +39,8 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['metrics', planId] });
       queryClient.invalidateQueries({ queryKey: ['accounts', planId] });
+      queryClient.invalidateQueries({ queryKey: ['categories', planId] });
+      queryClient.invalidateQueries({ queryKey: ['payees', planId] });
     },
   });
 
