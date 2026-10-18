@@ -87,19 +87,42 @@ export async function uploadCSV(planId: string, file: File): Promise<UploadResul
 export const syncBudgets = () =>
   request<{ status: string }>('/sync/budgets', { method: 'POST' });
 
-export async function syncPlanData(planId: string, full = false) {
-  const signal = AbortSignal.timeout(180_000);
+interface SyncJob {
+  id: string;
+  status: 'running' | 'success' | 'error';
+  message: string;
+}
+
+export async function syncPlanData(planId: string, full = false, onProgress?: (message: string) => void) {
+  let job: SyncJob;
   try {
-    return await request<{ status: string }>(
-      `/sync/plan/${planId}${full ? '?full=true' : ''}`,
-      { method: 'POST', signal },
-    );
-  } catch (error) {
-    if (signal.aborted) {
-      throw new Error('Sync did not respond within 3 minutes. The server may still be syncing. Check your historical data before retrying.');
-    }
-    throw error;
+    job = await request<SyncJob>(`/sync/plan/${planId}/jobs?full=${full}`, {
+      method: 'POST', signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    throw new Error('Could not start or reconnect to sync. Please retry; any active sync will be reused.');
   }
+  let failures = 0;
+  const deadline = Date.now() + 65 * 60_000;
+  while (job.status === 'running') {
+    if (Date.now() > deadline) {
+      throw new Error('Sync stopped reporting completion. Please retry to check its status.');
+    }
+    onProgress?.(job.message);
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      job = await request<SyncJob>(`/sync/jobs/${job.id}`, { signal: AbortSignal.timeout(15_000) });
+      failures = 0;
+    } catch {
+      failures += 1;
+      if (failures >= 5) {
+        throw new Error('Lost connection while checking sync. The server may still be syncing. Retry to reconnect to the active sync.');
+      }
+      onProgress?.('Reconnecting to sync…');
+    }
+  }
+  if (job.status === 'error') throw new Error(job.message);
+  return job;
 }
 
 export const trainModels = (planId: string) =>

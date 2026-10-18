@@ -14,6 +14,7 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
   const queryClient = useQueryClient();
   const [autoApproveThreshold, setAutoApproveThreshold] = useState(95);
   const [reviewThreshold, setReviewThreshold] = useState(75);
+  const [syncProgress, setSyncProgress] = useState('Starting sync…');
   const [tab, setTab] = useState<'general' | 'rules'>('general');
 
   const categoriesQuery = useQuery({
@@ -35,7 +36,10 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
   });
 
   const fullSyncMutation = useMutation({
-    mutationFn: () => syncPlanData(planId, true),
+    mutationFn: () => {
+      setSyncProgress('Starting sync…');
+      return syncPlanData(planId, true, setSyncProgress);
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['metrics', planId] });
       queryClient.invalidateQueries({ queryKey: ['accounts', planId] });
@@ -135,7 +139,7 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
                 disabled={fullSyncMutation.isPending || !planId}
               >
                 {fullSyncMutation.isPending ? (
-                  <><Loader2 size={16} className="loading-pulse" /> Syncing transactions…</>
+                  <><Loader2 size={16} className="loading-pulse" /> {syncProgress}</>
                 ) : (
                   <><Database size={16} /> Full Sync (Categories + Payees + Transactions)</>
                 )}

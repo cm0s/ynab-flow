@@ -1,7 +1,7 @@
 import os
 from dataclasses import asdict
 from dotenv import load_dotenv
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Query
+from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -103,6 +103,35 @@ def sync_plan_data(
         return {"status": "success", "message": f"Successfully synced data for plan: {plan.name}"}
     except YNABAPIError as e:
         raise HTTPException(status_code=502, detail=str(e))
+
+@app.post("/sync/plan/{plan_id}/jobs", status_code=202)
+def start_plan_sync(
+    plan_id: str,
+    background_tasks: BackgroundTasks,
+    full: bool = False,
+    db: Session = Depends(get_db),
+    client: YnabClient = Depends(get_ynab_client),
+    _user: str = Depends(verify_token),
+):
+    from src.sync_jobs import start_job, run_job
+    if not db.get(Plan, plan_id):
+        raise HTTPException(status_code=404, detail="Plan not found in local database.")
+    job, created = start_job(db, plan_id)
+    if created:
+        background_tasks.add_task(run_job, job.id, full, client.api_key)
+    return {"id": job.id, "status": job.status, "message": job.message}
+
+
+@app.get("/sync/jobs/{job_id}")
+def get_sync_job(job_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    from src.models import SyncJob
+    from src.sync_jobs import expire_job
+    job = db.get(SyncJob, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Sync job not found. Please retry.")
+    expire_job(db, job)
+    return {"id": job.id, "status": job.status, "message": job.message}
+
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas for Phase 3
