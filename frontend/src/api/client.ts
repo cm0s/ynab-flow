@@ -125,8 +125,17 @@ export async function syncPlanData(planId: string, full = false, onProgress?: (m
   return job;
 }
 
-export const trainModels = (planId: string) =>
-  request<{ status: string }>(`/train?plan_id=${planId}`, { method: 'POST' });
+export async function trainModels(planId: string) {
+  const signal = AbortSignal.timeout(120_000);
+  try {
+    return await request<{ status: string }>(`/train?plan_id=${planId}`, { method: 'POST', signal });
+  } catch (error) {
+    if (signal.aborted || error instanceof TypeError) {
+      throw new Error('Lost connection to the server during model training. It may still be running or may have restarted. Wait a moment before retrying.');
+    }
+    throw error;
+  }
+}
 
 /* ---- Reclassify ---- */
 export function reclassify(planId: string, batchId?: string): Promise<UploadResult> {

@@ -185,3 +185,20 @@ def test_update_rule_then_classify(test_client, plan, db_session):
     assert match is not None
     assert match.assign_payee == "Migros SA"
     assert match.assign_category == "Food"
+
+
+def test_training_rejects_concurrent_requests(test_client, plan):
+    from src.main import training_lock
+    with training_lock:
+        response = test_client.post(f'/train?plan_id={plan.id}')
+    assert response.status_code == 409
+
+
+def test_training_reports_insufficient_data(test_client, plan, monkeypatch):
+    from src.main import MLClassifier, training_lock
+    monkeypatch.setattr(MLClassifier, 'train', lambda *args: {
+        'payee_trained': False, 'category_trained': False, 'training_rows': 0,
+    })
+    response = test_client.post(f'/train?plan_id={plan.id}')
+    assert response.status_code == 422
+    assert not training_lock.locked()
