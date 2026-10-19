@@ -52,6 +52,9 @@ export interface PredictionRow {
   flag_ignore: boolean;
 }
 
+export type TransferState = 'none' | 'candidate' | 'ambiguous' | 'resolved' | 'linked';
+export type WriteState = 'unsent' | 'created' | 'existing' | 'error' | 'unresolved';
+
 export interface ImportRowData extends PredictionRow {
   id: string;
   status: string;
@@ -59,26 +62,63 @@ export interface ImportRowData extends PredictionRow {
   edited_category: string;
   edited_memo: string;
   flag_color: string;
+  amount_milliunits?: number | null;
+  currency?: string;
+  source_format?: string;
+  source_status?: string;
+  evidence?: Record<string, string>;
+  account_id?: string | null;
+  source_id?: string | null;
+  import_id?: string | null;
+  payee_confidence?: number;
+  category_confidence?: number;
+  payee_source?: string;
+  category_source?: string;
+  review_flag?: boolean;
+  transfer_state?: TransferState;
+  transfer_account_id?: string | null;
+  reconciliation_state?: string;
+  reconciliation_note?: string;
+  write_state?: WriteState;
+  write_error?: string;
 }
 
-export interface UploadResult {
+export interface ImportReport {
+  source_format: string;
+  detected: number;
+  eligible: number;
+  pending: number;
+  invalid: number;
+  already_imported?: number;
+  errors: { line: number; message: string }[];
+}
+
+export interface BatchContext {
+  account_id: string | null;
+  account_name: string | null;
+  account_confirmed: boolean;
+  source_format: string;
+  report: Partial<ImportReport>;
+}
+
+export interface UploadResult extends Partial<BatchContext> {
   batch_id?: string;
   count: number;
   predictions: ImportRowData[];
 }
 
-export async function uploadCSV(planId: string, file: File): Promise<UploadResult> {
+export async function uploadCSV(planId: string, accountId: string, file: File): Promise<UploadResult> {
   const form = new FormData();
   form.append('file', file);
   const authHeaders = await getAuthHeaders();
-  const res = await fetch(`${BASE}/upload-csv?plan_id=${planId}`, {
+  const res = await fetch(`${BASE}/upload-csv?plan_id=${planId}&account_id=${encodeURIComponent(accountId)}`, {
     method: 'POST',
     body: form,
     headers: authHeaders,
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.detail || `Upload error ${res.status}`);
+    throw new Error(typeof body.detail === 'string' ? body.detail : `Upload error ${res.status}`);
   }
   return res.json();
 }
@@ -146,7 +186,7 @@ export function reclassify(planId: string, batchId?: string): Promise<UploadResu
 }
 
 /* ---- Import Batches ---- */
-export interface ActiveBatchResponse {
+export interface ActiveBatchResponse extends BatchContext {
   batch_id: string;
   filename: string | null;
   created_at: string | null;
@@ -175,6 +215,35 @@ export function updateImportRows(updates: ImportRowUpdate[]) {
 export function completeBatch(batchId: string) {
   return request<{ status: string }>(`/import-batches/${batchId}/complete`, { method: 'POST' });
 }
+
+export interface ReconcileResponse extends ActiveBatchResponse {
+  warning: string | null;
+  transfer_account_suggestions: string[];
+  linked_count: number;
+}
+
+export const reconcileBatch = (batchId: string) =>
+  request<ReconcileResponse>(`/import-batches/${batchId}/reconcile`, { method: 'POST' });
+
+export type ResolveAction = 'link_existing' | 'confirm_new' | 'confirm_same';
+
+export const resolveRow = (rowId: string, action: ResolveAction, ynabTransactionId?: string) =>
+  request<ImportRowData>(`/import-rows/${rowId}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({ action, ynab_transaction_id: ynabTransactionId }),
+  });
+
+export const routeTransfer = (rowId: string, accountId: string | null) =>
+  request<ImportRowData & { warning: string | null }>(`/import-rows/${rowId}/transfer`, {
+    method: 'POST',
+    body: JSON.stringify({ account_id: accountId }),
+  });
+
+export const reassignAccount = (batchId: string, accountId: string) =>
+  request<ActiveBatchResponse>(`/import-batches/${batchId}/reassign-account`, {
+    method: 'POST',
+    body: JSON.stringify({ account_id: accountId }),
+  });
 
 /* ---- Accounts ---- */
 export interface Account {
@@ -207,46 +276,50 @@ export const fetchPayees = (planId: string) =>
   request<PayeeItem[]>(`/plans/${planId}/payees`);
 
 /* ---- Write-Back ---- */
-export interface WriteBackTransaction {
-  date: string;
-  amount: number;
+/** Reference to a persisted import row; bank values (amount, date, account) are read server-side. */
+export interface WriteBackRow {
+  row_id: string;
   payee_name: string;
   category_name: string;
   memo: string;
-  account_id: string;
-  cleared?: string;
   flag_color?: string;
 }
 
+export type WriteStatus = 'created' | 'existing' | 'error' | 'unresolved' | 'dry_run_ok' | 'dry_run_error';
+
 export interface WriteBackResultItem {
   index: number;
+  row_id: string;
+  source_id: string | null;
+  import_id: string | null;
   date: string;
   payee_name: string;
   amount: number;
-  status: string;
+  amount_milliunits: number | null;
+  status: WriteStatus;
   ynab_transaction_id: string | null;
   error: string | null;
-  import_id: string | null;
 }
 
 export interface WriteBackResponse {
   mode: string;
   total: number;
   created: number;
-  skipped: number;
+  existing: number;
   errors: number;
+  unresolved: number;
   results: WriteBackResultItem[];
 }
 
 export function writeBack(
   planId: string,
   mode: string,
-  transactions: WriteBackTransaction[],
+  rows: WriteBackRow[],
   batchId?: string,
 ): Promise<WriteBackResponse> {
   return request<WriteBackResponse>('/write-back', {
     method: 'POST',
-    body: JSON.stringify({ plan_id: planId, mode, transactions, batch_id: batchId }),
+    body: JSON.stringify({ plan_id: planId, mode, rows, batch_id: batchId }),
   });
 }
 

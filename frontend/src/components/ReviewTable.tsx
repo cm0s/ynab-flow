@@ -1,6 +1,6 @@
 import { useState, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import type { PredictionRow, ImportRowData, CategoryGroup, PayeeItem } from '../api/client';
+import type { ImportRowData, CategoryGroup, PayeeItem } from '../api/client';
 import { CategoryPicker, PayeePicker } from './SearchablePicker';
 import {
   CheckCircle, AlertTriangle, HelpCircle, Zap, Clock, Brain,
@@ -13,7 +13,7 @@ export type ReviewStatus = 'pending' | 'accepted' | 'ignored';
 
 export type FlagColor = '' | 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple';
 
-export interface ReviewedRow extends PredictionRow {
+export interface ReviewedRow extends Omit<ImportRowData, "status"> {
   id: string;
   status: ReviewStatus;
   editedPayee: string;
@@ -528,7 +528,10 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
 
                   {/* Confidence */}
                   <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <div
+                      style={{ display: 'flex', alignItems: 'center', gap: 6 }}
+                      title={`Payee ${((row.payee_confidence ?? 0) * 100).toFixed(0)}% (${row.payee_source ?? 'n/a'}) · Category ${((row.category_confidence ?? 0) * 100).toFixed(0)}% (${row.category_source ?? 'n/a'}). Confidence is an operational score, not measured accuracy. ${row.explanation}`}
+                    >
                       <div className="confidence-bar">
                         <div
                           className={`confidence-bar-fill ${confLevel(row.confidence)}`}
@@ -543,6 +546,16 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
 
                   {/* Status */}
                   <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>
+                    {row.write_state && ['error', 'unresolved'].includes(row.write_state) && (
+                      <span className="badge badge-danger" title={row.write_error || ''} style={{ marginRight: 4 }}>
+                        <AlertTriangle size={12} /> {row.write_state}
+                      </span>
+                    )}
+                    {row.transfer_state && row.transfer_state !== 'none' && (
+                      <span className="badge badge-info" title={row.reconciliation_note || ''} style={{ marginRight: 4 }}>
+                        transfer: {row.transfer_state}
+                      </span>
+                    )}
                     {row.status === 'accepted' && (
                       <span className="badge badge-success"><Check size={12} /> Accepted</span>
                     )}

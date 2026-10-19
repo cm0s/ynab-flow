@@ -31,3 +31,14 @@ def test_combined_signals():
     )
     assert result.is_transfer is True
     assert result.confidence >= 0.5
+
+
+from src.transfer_detector import detect_repayment
+
+
+def test_blank_merchant_repayment_detected_but_refund_is_not():
+    assert detect_repayment("Payment Thank You", 6000.0, merchant="").is_transfer
+    assert detect_repayment("Zahlung - Danke", 250.0).is_transfer
+    assert not detect_repayment("Refund Shop 1", 43.7, merchant="Shop 1").is_transfer
+    assert not detect_repayment("Payment Thank You", -5.0).is_transfer       # debit never a repayment
+    assert not detect_repayment("Some Positive Credit", 10.0).is_transfer    # positive alone is not enough

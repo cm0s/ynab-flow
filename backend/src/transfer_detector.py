@@ -85,3 +85,27 @@ def detect_transfer(
         confidence=confidence,
         reason="; ".join(reasons) if reasons else "no transfer signals detected",
     )
+
+
+# Card repayment descriptions (Swisscard-style exports). A repayment is a
+# positive amount whose description matches; a merchant refund never does.
+REPAYMENT_PATTERNS = [
+    re.compile(r"\bpayment\b.*\bthank\s*you\b", re.IGNORECASE),
+    re.compile(r"\bthank\s*you\b.*\bpayment\b", re.IGNORECASE),
+    re.compile(r"\bzahlung\b.*\bdanke\b", re.IGNORECASE),
+    re.compile(r"\beinzahlung\b", re.IGNORECASE),
+    re.compile(r"\bpaiement\b.*\bmerci\b", re.IGNORECASE),
+    re.compile(r"\bcard\s+(re)?payment\b", re.IGNORECASE),
+    re.compile(r"\bpayment\s+received\b", re.IGNORECASE),
+]
+
+
+def detect_repayment(description: str, amount: float, merchant: str = "") -> TransferDetectionResult:
+    """Detect a card repayment candidate. Candidate only: routing is confirmed separately."""
+    if amount <= 0:
+        return TransferDetectionResult(False, 0.0, "not a credit")
+    for pattern in REPAYMENT_PATTERNS:
+        if pattern.search(description or ""):
+            return TransferDetectionResult(
+                True, 0.9, f"description matches card repayment pattern: {pattern.pattern}")
+    return TransferDetectionResult(False, 0.0, "no repayment signals detected")

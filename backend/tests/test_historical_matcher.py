@@ -45,7 +45,7 @@ def _seed(db):
 
     txn = Transaction(
         plan_id=plan.id, account_id=acct.id, payee_id=payee.id, category_id=cat.id,
-        ynab_transaction_id="t1", date="2025-01-15", amount=-45.0,
+        ynab_transaction_id="t1", date="2025-01-15", amount=-45000,
         memo="ACHAT/PRESTATION TWINT DU 15.01.2025 MIGROS LAUSANNE (CH)",
     )
     db.add(txn)
@@ -95,7 +95,7 @@ def test_fuzzy_match_frequency_boost(db):
     for i, city in enumerate(["BERN", "ZURICH", "BASEL"]):
         txn = Transaction(
             plan_id=plan.id, account_id=acct.id, payee_id=payee.id, category_id=cat.id,
-            ynab_transaction_id=f"t-extra-{i}", date="2025-02-01", amount=-25.0,
+            ynab_transaction_id=f"t-extra-{i}", date="2025-02-01", amount=-25000,
             memo=f"ACHAT/PRESTATION TWINT DU 01.02.2025 MIGROS {city} (CH)",
         )
         db.add(txn)
@@ -123,3 +123,89 @@ def test_no_match(db):
     # Should return None or a very low-confidence fuzzy match
     if result:
         assert result.confidence < 0.6
+
+
+# --- Reliable import foundations: units, context and conflicts ---
+
+def _add_txn(db, plan, n, memo, payee, category, account, amount_milli):
+    db.add(Transaction(
+        plan_id=plan.id, account_id=account.id, payee_id=payee.id if payee else None,
+        category_id=category.id if category else None, ynab_transaction_id=f"x{n}",
+        date="2026-01-01", amount=amount_milli, amount_milliunits=amount_milli, memo=memo,
+    ))
+
+
+def _world(db):
+    plan = _seed(db)
+    acct1 = db.query(Account).first()
+    acct2 = Account(plan_id=plan.id, ynab_account_id="a2", name="Card", type="creditCard")
+    groceries = db.query(Category).first()
+    dining = Category(category_group_id=groceries.category_group_id, ynab_category_id="c2", name="Dining")
+    db.add_all([acct2, dining])
+    db.flush()
+    return plan, acct1, acct2, db.query(Payee).first(), groceries, dining
+
+
+def test_amount_units_equivalent_to_currency_amount(db):
+    """CHF -50.00 from CSV and -50000 milliunits in history are the same amount."""
+    plan = _seed(db)
+    db.query(Transaction).update({"amount": -50000, "amount_milliunits": -50000})
+    db.commit()
+    m = HistoricalMatcher(db, plan.id)
+    assert m._cache[0].amount == -50.0
+    close = HistoricalMatcher._similarity_score("A", "A", -50.0, "", "A", "A", m._cache[0].amount, "")
+    assert close == pytest.approx(0.4 + 0.3 + 0.1 + 0.1)  # sign and bucket match, no account bonus
+
+
+def test_missing_account_ids_give_no_agreement_bonus():
+    with_ids = HistoricalMatcher._similarity_score("A", "A", -5.0, "acc", "A", "A", -5.0, "acc")
+    without = HistoricalMatcher._similarity_score("A", "A", -5.0, "", "A", "A", -5.0, "")
+    assert with_ids - without == pytest.approx(0.1)
+
+
+def test_three_to_two_category_conflict_stays_below_auto_acceptance(db):
+    plan, acct1, _, payee, groceries, dining = _world(db)
+    for i in range(3):
+        _add_txn(db, plan, i, "SHOP X", payee, groceries, acct1, -10000)
+    for i in range(2):
+        _add_txn(db, plan, 10 + i, "SHOP X", payee, dining, acct1, -10000)
+    db.commit()
+    r = HistoricalMatcher(db, plan.id).match("SHOP X", "SHOP X", amount=-10.0, account_id=acct1.id)
+    assert r.category == "Groceries" and r.category_confidence == pytest.approx(0.6)
+    assert r.payee_confidence == 1.0           # payee is not in conflict
+    assert r.conflict and r.confidence < 0.95 and "Conflicting" in r.explanation
+
+
+def test_ties_are_deterministic_and_unconfident(db):
+    plan, acct1, _, payee, groceries, dining = _world(db)
+    _add_txn(db, plan, 1, "TIE", payee, dining, acct1, -1000)
+    _add_txn(db, plan, 2, "TIE", payee, groceries, acct1, -1000)
+    db.commit()
+    r = HistoricalMatcher(db, plan.id).match("TIE", "TIE", amount=-1.0, account_id=acct1.id)
+    assert r.category == "Dining" and r.category_confidence == pytest.approx(0.45)
+
+
+def test_account_and_sign_context_select_evidence(db):
+    plan, acct1, acct2, payee, groceries, dining = _world(db)
+    _add_txn(db, plan, 1, "AMBIG", payee, groceries, acct1, -2000)
+    _add_txn(db, plan, 2, "AMBIG", payee, dining, acct2, -2000)
+    _add_txn(db, plan, 3, "AMBIG", payee, dining, acct1, 2000)  # refund on same account
+    db.commit()
+    m = HistoricalMatcher(db, plan.id)
+    assert m.match("AMBIG", "AMBIG", -2.0, acct1.id).category == "Groceries"
+    assert m.match("AMBIG", "AMBIG", -2.0, acct2.id).category == "Dining"
+    assert m.match("AMBIG", "AMBIG", 2.0, acct1.id).category == "Dining"
+
+
+def test_contextual_fallback_is_capped_below_auto_acceptance(db):
+    plan, acct1, acct2, payee, groceries, _ = _world(db)
+    for i in range(5):
+        _add_txn(db, plan, i, "ONLYELSEWHERE", payee, groceries, acct1, -3000)
+    db.commit()
+    m = HistoricalMatcher(db, plan.id)
+    same = m.match("ONLYELSEWHERE", "X", -3.0, acct1.id)
+    other = m.match("ONLYELSEWHERE", "X", -3.0, acct2.id)
+    refund = m.match("ONLYELSEWHERE", "X", 3.0, acct1.id)
+    assert same.confidence == 1.0 and same.context == "account+sign"
+    assert other.context == "sign" and other.confidence <= 0.90
+    assert refund.context == "any" and refund.confidence <= 0.70

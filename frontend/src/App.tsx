@@ -4,8 +4,10 @@ import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
   CheckCircle, AlertCircle, XCircle, Settings, BarChart3, LogOut,
 } from 'lucide-react';
-import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, fetchPayees, writeBack, createRule, reclassify, fetchActiveBatch, updateImportRows, completeBatch } from './api/client';
-import type { Plan, ImportRowData, Account, CategoryGroup, PayeeItem, WriteBackResponse } from './api/client';
+import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, fetchPayees, writeBack, createRule, reclassify, fetchActiveBatch, updateImportRows, completeBatch, reconcileBatch, resolveRow, routeTransfer, reassignAccount } from './api/client';
+import type { Plan, ImportRowData, Account, CategoryGroup, PayeeItem, WriteBackResponse, BatchContext, ResolveAction } from './api/client';
+import { handledRowIds, removeHandled, canCompleteBatch, describeImport, SOURCE_LABELS } from './lib/importFlow';
+import ResolutionPanel from './components/ResolutionPanel';
 import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
 import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
@@ -31,6 +33,21 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
   const [ruleToast, setRuleToast] = useState<string | null>(null);
   const [isReclassifying, setIsReclassifying] = useState(false);
   const [changedRows, setChangedRows] = useState<Set<number>>(new Set());
+  const [batchContext, setBatchContext] = useState<BatchContext | null>(null);
+  const [suggestedAccountIds, setSuggestedAccountIds] = useState<string[]>([]);
+  const [resolveBusy, setResolveBusy] = useState(false);
+  const [resolveWarning, setResolveWarning] = useState<string | null>(null);
+
+  const applyBatchContext = (ctx: Partial<BatchContext>) => {
+    setBatchContext({
+      account_id: ctx.account_id ?? null,
+      account_name: ctx.account_name ?? null,
+      account_confirmed: ctx.account_confirmed ?? false,
+      source_format: ctx.source_format ?? '',
+      report: ctx.report ?? {},
+    });
+    if (ctx.account_id) setSelectedAccountId(ctx.account_id);
+  };
 
   const plansQuery = useQuery({ queryKey: ['plans'], queryFn: fetchPlans });
 
@@ -64,6 +81,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
   useEffect(() => {
     if (activeBatchQuery.data && !batchId) {
       const { batch_id, rows } = activeBatchQuery.data;
+      applyBatchContext(activeBatchQuery.data);
       setBatchId(batch_id);
       setPredictions(rows);
       setReviewRows(toReviewedRows(rows));
@@ -88,9 +106,12 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
   const uploadMutation = useMutation({
     mutationFn: (file: File) => {
       if (!selectedPlanId) throw new Error('Select a budget first');
-      return uploadCSV(selectedPlanId, file);
+      if (!selectedAccountId) throw new Error('Select the target account for this file first');
+      return uploadCSV(selectedPlanId, selectedAccountId, file);
     },
     onSuccess: (data) => {
+      applyBatchContext(data);
+      setResolveWarning(null);
       setBatchId(data.batch_id || null);
       setPredictions(data.predictions);
       setReviewRows(toReviewedRows(data.predictions));
@@ -100,38 +121,39 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
 
   const writeMutation = useMutation({
     mutationFn: () => {
+      // Rows are referenced by id; amount, date and account come from the server's persisted evidence
       const accepted = reviewRows.filter((r) => r.status === 'accepted');
-      const txns = accepted.map((r) => ({
-        date: r.date,
-        amount: r.amount,
+      const rows = accepted.map((r) => ({
+        row_id: r.id,
         payee_name: r.editedPayee,
         category_name: r.editedCategory,
         memo: r.editedMemo || r.original_memo,
-        account_id: selectedAccountId,
         flag_color: r.flagColor || undefined,
       }));
-      return writeBack(selectedPlanId, writeMode, txns, batchId ?? undefined);
+      return writeBack(selectedPlanId, writeMode, rows, batchId ?? undefined);
     },
     onSuccess: async (data) => {
       setWriteResult(data);
-      // For non-dry-run writes, remove pushed (accepted) rows only if some were actually created
-      if (data.mode !== 'dry_run' && batchId && data.created > 0) {
-        const remainingPredictions = predictions.filter(
-          (_, i) => reviewRows[i]?.status !== 'accepted'
-        );
-        const remainingRows = reviewRows.filter((r) => r.status !== 'accepted');
-
-        if (remainingRows.length === 0) {
-          // All rows pushed — complete the batch
-          await completeBatch(batchId).catch(() => {});
+      // Dry runs change nothing; real writes drop only rows YNAB confirmed (created or already existing)
+      if (data.mode === 'dry_run' || !batchId) return;
+      const handled = handledRowIds(data);
+      const failures = new Map(data.results.filter((r) => r.status === 'error' || r.status === 'unresolved').map((r) => [r.row_id, r]));
+      const remainingRows = removeHandled(reviewRows, handled).map((r) => {
+        const f = failures.get(r.id);
+        return f ? { ...r, write_state: f.status as 'error' | 'unresolved', write_error: f.error ?? '' } : r;
+      });
+      setPredictions(removeHandled(predictions, handled));
+      setReviewRows(remainingRows);
+      if (handled.size > 0 && canCompleteBatch(remainingRows)) {
+        try {
+          await completeBatch(batchId);
           setBatchId(null);
+          setBatchContext(null);
           setPredictions([]);
           setReviewRows([]);
           queryClient.invalidateQueries({ queryKey: ['activeBatch', selectedPlanId] });
-        } else {
-          // Keep remaining rows for further review
-          setPredictions(remainingPredictions);
-          setReviewRows(remainingRows);
+        } catch {
+          // The server still sees retryable rows; keep the batch open
         }
       }
     },
@@ -144,9 +166,6 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
 
   if (plans.length > 0 && !selectedPlanId) {
     setSelectedPlanId(plans[0].id);
-  }
-  if (accounts.length > 0 && !selectedAccountId) {
-    setSelectedAccountId(accounts[0].id);
   }
 
   /* ---- Review callbacks ---- */
@@ -234,6 +253,63 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
       setTimeout(() => setRuleToast(null), 3000);
     }
   }, [selectedPlanId, reclassifyRows]);
+
+  /* ---- Reconciliation / repayment resolution ---- */
+  const replaceRows = (rows: ImportRowData[]) => {
+    setPredictions(rows);
+    setReviewRows(toReviewedRows(rows));
+  };
+
+  const mergeUpdatedRow = (updated: Partial<ImportRowData> & { id: string }) => {
+    if (updated.write_state === 'created' || updated.write_state === 'existing') {
+      setPredictions((prev) => prev.filter((p) => p.id !== updated.id));
+      setReviewRows((prev) => prev.filter((r) => r.id !== updated.id));
+      return;
+    }
+    setPredictions((prev) => prev.map((p) => (p.id === updated.id ? { ...p, ...updated } as ImportRowData : p)));
+    setReviewRows((prev) => prev.map((r) => (r.id === updated.id ? { ...r, ...updated } as ReviewedRow : r)));
+  };
+
+  const runResolution = async (task: () => Promise<void>) => {
+    setResolveBusy(true);
+    try {
+      await task();
+    } catch (e) {
+      setResolveWarning((e as Error).message);
+    } finally {
+      setResolveBusy(false);
+    }
+  };
+
+  const handleRecheck = useCallback(() => runResolution(async () => {
+    if (!batchId) return;
+    const res = await reconcileBatch(batchId);
+    replaceRows(res.rows);
+    setSuggestedAccountIds(res.transfer_account_suggestions);
+    setResolveWarning(res.warning);
+    if (res.linked_count > 0) {
+      setRuleToast(`${res.linked_count} row(s) already exist in YNAB and were removed from the queue`);
+      setTimeout(() => setRuleToast(null), 3000);
+    }
+  }), [batchId]);
+
+  const handleResolve = (rowId: string, action: ResolveAction, ynabId?: string) => runResolution(async () => {
+    mergeUpdatedRow(await resolveRow(rowId, action, ynabId));
+    setResolveWarning(null);
+  });
+
+  const handleRoute = (rowId: string, accountId: string | null) => runResolution(async () => {
+    const { warning, ...row } = await routeTransfer(rowId, accountId);
+    mergeUpdatedRow(row);
+    setResolveWarning(warning);
+  });
+
+  const handleConfirmAccount = (accountId: string) => runResolution(async () => {
+    if (!batchId) return;
+    const res = await reassignAccount(batchId, accountId);
+    applyBatchContext(res);
+    replaceRows(res.rows);
+  });
 
   /* ---- Export CSV ---- */
   const handleExport = () => {
@@ -364,10 +440,32 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
           <>
             <section style={{ marginBottom: 32 }} className="animate-in">
               <h2 style={{ marginBottom: 16 }}>Import Transactions</h2>
+              <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+                <label htmlFor="import-account" style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
+                  Target account for this file
+                </label>
+                <div className="select-wrapper">
+                  <select
+                    id="import-account"
+                    value={selectedAccountId}
+                    onChange={(e) => setSelectedAccountId(e.target.value)}
+                  >
+                    <option value="">Select account…</option>
+                    {accounts.map((a) => (
+                      <option key={a.id} value={a.id}>{a.name} ({a.type})</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
               <FileDrop
                 onFile={(file) => uploadMutation.mutate(file)}
-                disabled={uploadMutation.isPending || !selectedPlanId}
+                disabled={uploadMutation.isPending || !selectedPlanId || !selectedAccountId}
               />
+              {!selectedAccountId && (
+                <p style={{ textAlign: 'center', marginTop: 8, color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                  Choose the account first: predictions and duplicate checks depend on it.
+                </p>
+              )}
               {uploadMutation.isPending && (
                 <p style={{ textAlign: 'center', marginTop: 16, color: 'var(--text-muted)' }} className="loading-pulse">
                   <Loader2 size={20} style={{ verticalAlign: 'middle', marginRight: 8 }} />
@@ -383,7 +481,16 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
             {predictions.length > 0 && (
               <section className="animate-in" style={{ animationDelay: '100ms' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                  <h2>Last Import ({predictions.length} transactions)</h2>
+                  <div>
+                    <h2>Last Import ({predictions.length} transactions)</h2>
+                    {batchContext && (
+                      <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: 4 }}>
+                        {SOURCE_LABELS[batchContext.source_format] || batchContext.source_format || 'Earlier import'}
+                        {' → '}{batchContext.account_name || 'account not confirmed'}
+                        {describeImport(batchContext.report) && ` · ${describeImport(batchContext.report)}`}
+                      </p>
+                    )}
+                  </div>
                   <button className="btn btn-primary" onClick={() => setView('review')}>
                     Review & Approve →
                   </button>
@@ -395,7 +502,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
               <section className="animate-in" style={{ textAlign: 'center', padding: '64px 0', color: 'var(--text-muted)' }}>
                 <Workflow size={64} style={{ color: 'var(--accent-subtle)', marginBottom: 16 }} />
                 <p style={{ fontSize: '1rem' }}>Upload a CSV file to classify your transactions</p>
-                <p style={{ fontSize: '0.85rem', marginTop: 4 }}>Supports PostFinance / BCGE export format</p>
+                <p style={{ fontSize: '0.85rem', marginTop: 4 }}>Supports Swisscard, PostFinance / BCGE and generic Date/Memo/Inflow/Outflow exports</p>
               </section>
             )}
           </>
@@ -404,7 +511,45 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
         {/* REVIEW */}
         {view === 'review' && (
           <section className="animate-in">
-            <h2 style={{ marginBottom: 16 }}>Review Transactions</h2>
+            <h2 style={{ marginBottom: 8 }}>Review Transactions</h2>
+            {batchContext && (
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 12 }}>
+                {SOURCE_LABELS[batchContext.source_format] || batchContext.source_format || 'Earlier import'}
+                {' → '}<strong>{batchContext.account_name || 'account not confirmed'}</strong>
+                {describeImport(batchContext.report) && ` · ${describeImport(batchContext.report)}`}
+              </p>
+            )}
+            {batchContext && !batchContext.account_confirmed && (
+              <div className="card" style={{ padding: 16, marginBottom: 16, borderColor: 'var(--warning)' }}>
+                <strong>This batch predates account selection.</strong>
+                <p style={{ fontSize: '0.85rem', margin: '4px 0 8px' }}>Confirm the account it belongs to before pushing; predictions and duplicate checks will be redone.</p>
+                <div className="select-wrapper">
+                  <select value="" onChange={(e) => e.target.value && handleConfirmAccount(e.target.value)} disabled={resolveBusy}>
+                    <option value="">Confirm account…</option>
+                    {accounts.map((a) => (<option key={a.id} value={a.id}>{a.name} ({a.type})</option>))}
+                  </select>
+                </div>
+              </div>
+            )}
+            {batchContext?.report?.invalid ? (
+              <details className="card" style={{ padding: 12, marginBottom: 16 }}>
+                <summary>{batchContext.report.invalid} row(s) in the file could not be read and were skipped</summary>
+                <ul style={{ fontSize: '0.8rem', marginTop: 8 }}>
+                  {(batchContext.report.errors ?? []).map((e) => (<li key={e.line}>Line {e.line}: {e.message}</li>))}
+                </ul>
+              </details>
+            ) : null}
+            <ResolutionPanel
+              rows={reviewRows}
+              accounts={accounts}
+              cardAccountId={batchContext?.account_id ?? null}
+              suggestedAccountIds={suggestedAccountIds}
+              busy={resolveBusy}
+              warning={resolveWarning}
+              onRecheck={handleRecheck}
+              onResolve={handleResolve}
+              onRoute={handleRoute}
+            />
             <StatsBar predictions={predictions} reviewRows={reviewRows} />
             <ReviewTable
               rows={reviewRows}
@@ -426,12 +571,11 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
               <h3 style={{ marginBottom: 20 }}>Write-Back Configuration</h3>
               <div style={{ marginBottom: 20 }}>
                 <label style={{ display: 'block', marginBottom: 6, color: 'var(--text-secondary)', fontSize: '0.85rem' }}>Target Account</label>
-                <div className="select-wrapper">
-                  <select value={selectedAccountId} onChange={(e) => setSelectedAccountId(e.target.value)}>
-                    {accounts.map((a) => (
-                      <option key={a.id} value={a.id}>{a.name} ({a.type})</option>
-                    ))}
-                  </select>
+                <div style={{ padding: '8px 12px', background: 'var(--bg-surface)', borderRadius: 'var(--radius-md)' }}>
+                  <strong>{batchContext?.account_name || 'Not confirmed'}</strong>
+                  <span style={{ color: 'var(--text-muted)', marginLeft: 8, fontSize: '0.8rem' }}>
+                    from {SOURCE_LABELS[batchContext?.source_format ?? ''] || batchContext?.source_format || 'import'} · set at import
+                  </span>
                 </div>
               </div>
               <div style={{ marginBottom: 20 }}>
@@ -443,6 +587,9 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
                     <option value="create_or_skip">🛡️ Create or Skip — skip duplicates</option>
                   </select>
                 </div>
+                <p style={{ color: 'var(--text-muted)', fontSize: '0.75rem', marginTop: 6 }}>
+                  Transactions are created unapproved in YNAB. Accepting a row here is local review only.
+                </p>
               </div>
               <div style={{
                 padding: 16, borderRadius: 'var(--radius-md)', background: 'var(--bg-surface)',
@@ -451,14 +598,14 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
                 <strong style={{ color: 'var(--text-primary)' }}>{acceptedCount}</strong>
                 <span style={{ color: 'var(--text-secondary)' }}> accepted transactions → </span>
                 <strong style={{ color: 'var(--text-primary)' }}>
-                  {accounts.find((a) => a.id === selectedAccountId)?.name || '—'}
+                  {batchContext?.account_name || '—'}
                 </strong>
               </div>
               <button
                 className="btn btn-primary"
                 style={{ width: '100%', justifyContent: 'center', padding: '14px 24px' }}
                 onClick={() => writeMutation.mutate()}
-                disabled={writeMutation.isPending || !selectedAccountId}
+                disabled={writeMutation.isPending || !batchContext?.account_confirmed || !batchContext?.account_id}
               >
                 {writeMutation.isPending ? (
                   <><Loader2 size={18} className="loading-pulse" /> Processing…</>
@@ -486,17 +633,26 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
                   <div className="card stat-card">
                     <div className="stat-value" style={{ color: 'var(--success)' }}>
                       <CheckCircle size={18} style={{ verticalAlign: 'middle', marginRight: 6 }} />
-                      {writeResult.mode === 'dry_run' ? writeResult.total - writeResult.errors : writeResult.created}
+                      {writeResult.mode === 'dry_run' ? writeResult.results.filter((r) => r.status === 'dry_run_ok').length : writeResult.created}
                     </div>
                     <div className="stat-label">{writeResult.mode === 'dry_run' ? 'Valid' : 'Created'}</div>
                   </div>
-                  {writeResult.skipped > 0 && (
+                  {writeResult.existing > 0 && (
                     <div className="card stat-card">
                       <div className="stat-value" style={{ color: 'var(--warning)' }}>
                         <AlertCircle size={18} style={{ verticalAlign: 'middle', marginRight: 6 }} />
-                        {writeResult.skipped}
+                        {writeResult.existing}
                       </div>
-                      <div className="stat-label">Skipped</div>
+                      <div className="stat-label">Already in YNAB</div>
+                    </div>
+                  )}
+                  {writeResult.unresolved > 0 && (
+                    <div className="card stat-card">
+                      <div className="stat-value" style={{ color: 'var(--warning)' }}>
+                        <AlertCircle size={18} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+                        {writeResult.unresolved}
+                      </div>
+                      <div className="stat-label">Unresolved</div>
                     </div>
                   )}
                   {writeResult.errors > 0 && (
@@ -517,7 +673,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
                       </thead>
                       <tbody>
                         {writeResult.results.map((r) => (
-                          <tr key={r.index}>
+                          <tr key={r.row_id}>
                             <td>{r.index + 1}</td>
                             <td>{r.date}</td>
                             <td>{r.payee_name}</td>
@@ -527,9 +683,9 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
                             <td>
                               <span className={`badge ${
                                 r.status === 'created' || r.status === 'dry_run_ok' ? 'badge-success' :
-                                r.status === 'skipped' ? 'badge-warning' : 'badge-danger'
+                                r.status === 'existing' || r.status === 'unresolved' ? 'badge-warning' : 'badge-danger'
                               }`}>
-                                {r.status.replace('_', ' ')}
+                                {r.status.replace(/_/g, ' ')}
                               </span>
                             </td>
                             <td style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
