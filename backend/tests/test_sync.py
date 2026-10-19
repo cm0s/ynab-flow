@@ -197,3 +197,24 @@ def test_transaction_sync_uses_constant_lookups_and_upserts(service, db):
     assert txn.memo == "Updated"
     assert txn.deleted is True
     assert plan.last_knowledge_transactions == "20"
+
+
+@respx.mock
+def test_sync_stores_integer_milliunits_import_id_and_transfer_linkage(service, db):
+    plan = Plan(id="p", ynab_plan_id="budget-1", name="B")
+    db.add(plan)
+    db.flush()
+    db.add(Account(id="a", plan_id="p", ynab_account_id="acc-1", name="A", type="checking"))
+    db.commit()
+    respx.get("https://api.ynab.com/v1/budgets/budget-1/transactions").mock(return_value=Response(200, json={"data": {
+        "transactions": [{
+            "id": "t1", "account_id": "acc-1", "payee_id": None, "category_id": None, "date": "2026-10-01",
+            "amount": -50000, "memo": "m", "cleared": "cleared", "approved": True, "deleted": False,
+            "import_id": "YF1:abc:1", "transfer_account_id": "acc-2", "transfer_transaction_id": "t0",
+        }],
+        "server_knowledge": 5,
+    }}))
+    service.sync_transactions(plan)
+    t = db.query(Transaction).one()
+    assert t.amount_milliunits == -50000 and isinstance(t.amount_milliunits, int)
+    assert (t.import_id, t.transfer_account_ynab_id, t.transfer_transaction_ynab_id) == ("YF1:abc:1", "acc-2", "t0")

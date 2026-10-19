@@ -1,267 +1,367 @@
 """
 FR-9: YNAB Write-Back Service
 
-Validates and pushes approved transactions to YNAB via API.
-Supports dry-run, create-only, and create-or-skip-if-duplicate modes.
+Pushes persisted import rows to YNAB. Bank values (date, amount, account,
+identity) are read from the persisted source record, never from the caller;
+only payee, category, memo and flag color are editable. Every created
+transaction is sent with ``approved=false`` so YNAB approval stays a separate
+audit step.
+
+Outcomes are correlated by import ID, never by response position. A source
+record is claimed (short committed state) before the network call, so no
+database transaction is held open during the request and simultaneous
+pushes cannot send the same source twice. Timeouts and 5xx responses leave
+the record ``reconcile_required``; the next push checks YNAB history before
+resending the same import ID.
 """
 
-import hashlib
 import logging
-import time
+import uuid
+from collections import Counter
 from dataclasses import dataclass, field
-from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
 
+import httpx
+from sqlalchemy import update
 from sqlalchemy.orm import Session
+
+from src.models import Account, Category, CategoryGroup, ImportRow, Payee, Plan, SourceRecord
+from src.money import milliunits_to_units
+from src.reconciliation import (
+    COMPLETED, block_reason, reconcile_rows, refresh_history, transfer_payee_for,
+)
 from src.ynab_client import YnabClient, YNABAPIError
-from src.models import Plan, Account, Category, CategoryGroup, Payee
 
 logger = logging.getLogger(__name__)
 
+CLAIM_TTL = timedelta(minutes=5)
+YNAB_MEMO_LIMIT = 200
+
 
 @dataclass
-class WriteTransaction:
-    """A single transaction ready for write-back."""
-    date: str              # YYYY-MM-DD
-    amount: float          # Positive = inflow, negative = outflow (user units)
-    payee_name: str
-    category_name: str
-    memo: str
-    account_id: str        # Local account ID
+class RowOverride:
+    """The only values a caller may supply for a persisted row."""
+    payee_name: str = ""
+    category_name: str = ""
+    memo: str = ""
+    flag_color: Optional[str] = None
     cleared: str = "uncleared"
-    flag_color: Optional[str] = None  # "red"|"orange"|"yellow"|"green"|"blue"|"purple" or None
 
 
 @dataclass
 class WriteResult:
-    """Result of a single write operation."""
+    """Result for one submitted row."""
     index: int
+    row_id: str
+    source_id: Optional[str]
+    import_id: Optional[str]
     date: str
     payee_name: str
-    amount: float
-    status: str              # "created" | "skipped" | "error" | "dry_run_ok" | "dry_run_error"
+    amount: float                      # currency units, display only
+    amount_milliunits: Optional[int]
+    status: str                        # created | existing | error | unresolved | dry_run_ok | dry_run_error
     ynab_transaction_id: Optional[str] = None
     error: Optional[str] = None
-    import_id: Optional[str] = None
 
 
 @dataclass
 class WriteBackResult:
-    """Aggregate result of the entire write-back operation."""
     mode: str
     total: int = 0
     created: int = 0
-    skipped: int = 0
+    existing: int = 0
     errors: int = 0
+    unresolved: int = 0
     results: List[WriteResult] = field(default_factory=list)
 
 
-class WriteBackService:
-    """
-    Orchestrates writing approved transactions to YNAB (FR-9).
-    """
+def recover_stale_claims(db: Session, older_than: Optional[timedelta] = CLAIM_TTL) -> int:
+    """Turn abandoned claims into reconcile_required (``older_than=None``: all, e.g. at startup)."""
+    query = db.query(SourceRecord).filter(SourceRecord.write_state == "claimed")
+    if older_than is not None:
+        query = query.filter(SourceRecord.claimed_at < datetime.utcnow() - older_than)
+    count = 0
+    for rec in query.all():
+        rec.write_state = "reconcile_required"
+        rec.claim_token = None
+        count += 1
+    db.commit()
+    return count
 
+
+class WriteBackService:
     def __init__(self, db: Session, ynab_client: YnabClient):
         self.db = db
         self.ynab = ynab_client
 
+    # ------------------------------------------------------------------
+
     def execute(
         self,
         plan_id: str,
-        transactions: List[WriteTransaction],
-        mode: str = "dry_run",  # "dry_run" | "create" | "create_or_skip"
-        batch_id: Optional[str] = None,
+        rows: List[ImportRow],
+        overrides: Dict[str, RowOverride],
+        mode: str = "dry_run",   # "dry_run" | "create" | "create_or_skip"
     ) -> WriteBackResult:
-        """
-        Validate and optionally write transactions to YNAB.
-        """
         plan = self.db.query(Plan).filter(Plan.id == plan_id).first()
         if not plan:
             raise ValueError(f"Plan {plan_id} not found")
+        dry = mode == "dry_run"
+        result = WriteBackResult(mode=mode, total=len(rows))
 
-        result = WriteBackResult(mode=mode, total=len(transactions))
-
-        # Build YNAB payloads with validation
-        # Track occurrence counts so identical transactions get unique import_ids
-        occurrence_counts: dict[str, int] = {}
-        payloads = []
-        for i, txn in enumerate(transactions):
-            wr = self._validate_and_build(plan, txn, i)
-            # Assign import_id with occurrence counter to avoid collisions
-            # Include batch_id so re-imports after deletion get fresh IDs
-            base_id = self._generate_import_id(txn, occurrence=1, batch_id=batch_id)
-            base_key = base_id.rsplit(":", 1)[0]  # strip the ":1" suffix
-            occurrence_counts[base_key] = occurrence_counts.get(base_key, 0) + 1
-            wr.import_id = f"{base_key}:{occurrence_counts[base_key]}"
+        recover_stale_claims(self.db)
+        fresh, fresh_msg = refresh_history(self.db, plan, self.ynab)
+        prepared: List[tuple] = []          # (WriteResult, row, override)
+        seen_sources = set()
+        for i, row in enumerate(rows):
+            ov = overrides.get(row.id) or RowOverride()
+            rec = row.source_record
+            wr = WriteResult(
+                index=i, row_id=row.id, source_id=rec.id if rec else None,
+                import_id=rec.import_id if rec else None, date=rec.date if rec else row.date,
+                payee_name=ov.payee_name, amount=milliunits_to_units(rec.amount_milliunits) if rec else row.amount,
+                amount_milliunits=rec.amount_milliunits if rec else None, status="pending",
+            )
             result.results.append(wr)
-
-            if wr.status.startswith("dry_run_error") or wr.status == "error":
-                result.errors += 1
-            elif mode == "dry_run":
-                wr.status = "dry_run_ok"
+            if rec is None:
+                self._fail(wr, "Row has no persisted source record; re-import it to obtain one.", dry)
+            elif rec.id in seen_sources:
+                self._fail(wr, "Duplicate submission of the same source row.", dry)
             else:
-                payloads.append((i, wr))
+                seen_sources.add(rec.id)
+                prepared.append((wr, row, ov))
 
-        if mode == "dry_run" or not payloads:
+        # Reconcile with refreshed history; a dry run must not persist links or completion
+        reconcile_rows(self.db, plan, [r for _, r, _ in prepared], fresh)
+        for wr, row, ov in prepared:
+            self._precheck(plan, wr, row, ov, dry, fresh_msg)
+            rec = row.source_record
+            if wr.status == "pending" and rec.write_state == "reconcile_required" and fresh and not dry:
+                rec.write_state = "unsent"     # confirmed absent from YNAB: same import ID may be resent
+        if dry:
+            for wr, row, _ in prepared:
+                if wr.status == "pending":
+                    wr.status = "dry_run_ok"
+            self._tally(result)
+            self.db.rollback()
             return result
+        self._persist_blocked(prepared)
+        self.db.commit()
 
-        # Build the YNAB transaction list
-        ynab_txns = []
-        payload_indices = []
-        for idx, wr in payloads:
-            txn = transactions[idx]
-            account = self.db.query(Account).filter(Account.id == txn.account_id).first()
-            ynab_account_id = account.ynab_account_id if account else ""
+        sendable = [(wr, row, ov) for wr, row, ov in prepared if wr.status == "pending"]
+        payloads = []
+        token = uuid.uuid4().hex
+        for wr, row, ov in sendable:
+            if not self._claim(row.source_record, token):
+                wr.status = "unresolved"
+                wr.error = "A write for this source row is already in progress or needs reconciliation."
+                continue
+            payloads.append((wr, row, self._build_payload(plan, row, ov)))
+        self._persist_blocked(sendable)
+        self.db.commit()
 
-            # YNAB amount is in milliunits (multiply by 1000)
-            millis = int(txn.amount * 1000)
-
-            ynab_txn = {
-                "account_id": ynab_account_id,
-                "date": txn.date,
-                "amount": millis,
-                "memo": txn.memo[:200] if txn.memo else "",
-                "cleared": txn.cleared,
-                "import_id": wr.import_id,
-            }
-
-            if txn.flag_color:
-                ynab_txn["flag_color"] = txn.flag_color
-
-            # Resolve payee to YNAB ID; fall back to payee_name for new payees
-            payee_id = self._resolve_payee_id(plan.id, txn.payee_name)
-            if payee_id:
-                ynab_txn["payee_id"] = payee_id
-            else:
-                ynab_txn["payee_name"] = txn.payee_name
-
-            # Resolve category to YNAB ID; explicitly set null to prevent
-            # YNAB from auto-assigning based on payee history
-            ynab_txn["category_id"] = self._resolve_category_id(plan.id, txn.category_name)
-
-            ynab_txns.append(ynab_txn)
-            payload_indices.append(idx)
-
-        # Send to YNAB
-        try:
-            import_ids = [t["import_id"] for t in ynab_txns]
-            unique_import_ids = set(import_ids)
-            logger.info(
-                "Sending %d transactions to YNAB (%d unique import_ids)",
-                len(ynab_txns), len(unique_import_ids),
-            )
-            if len(unique_import_ids) < len(import_ids):
-                from collections import Counter
-                dupes = {k: v for k, v in Counter(import_ids).items() if v > 1}
-                logger.warning("Duplicate import_ids within batch: %s", dupes)
-
-            t0 = time.monotonic()
-            response = self.ynab.create_transactions(plan.ynab_plan_id, ynab_txns)
-            elapsed = time.monotonic() - t0
-            created_ids = response.get("transaction_ids", [])
-            duplicate_ids = response.get("duplicate_import_ids", [])
-            logger.info(
-                "YNAB responded in %.1fs: %d created_ids, %d duplicate_import_ids, keys=%s",
-                elapsed, len(created_ids), len(duplicate_ids), list(response.keys()),
-            )
-
-            for j, idx in enumerate(payload_indices):
-                wr = result.results[idx]
-                if j < len(created_ids):
-                    wr.ynab_transaction_id = created_ids[j]
-                    wr.status = "created"
-                    result.created += 1
-                elif wr.import_id in duplicate_ids:
-                    wr.status = "skipped"
-                    wr.error = "Duplicate: already exists in YNAB"
-                    result.skipped += 1
-                else:
-                    wr.status = "created"
-                    result.created += 1
-
-        except YNABAPIError as e:
-            for idx in payload_indices:
-                wr = result.results[idx]
-                wr.status = "error"
-                wr.error = str(e)
-                result.errors += 1
-
+        if payloads:
+            self._send(plan, payloads)
+        self._tally(result)
         return result
 
-    def _validate_and_build(self, plan: Plan, txn: WriteTransaction, index: int) -> WriteResult:
-        """Validate a single transaction and build its WriteResult (FR-9.3)."""
-        wr = WriteResult(
-            index=index,
-            date=txn.date,
-            payee_name=txn.payee_name,
-            amount=txn.amount,
-            status="pending",
-        )
-
-        # Validate account exists
-        account = self.db.query(Account).filter(Account.id == txn.account_id).first()
-        if not account:
-            wr.status = "dry_run_error"
-            wr.error = f"Account not found: {txn.account_id}"
-            return wr
-
-        # Validate date format
-        try:
-            datetime.strptime(txn.date, "%Y-%m-%d")
-        except ValueError:
-            wr.status = "dry_run_error"
-            wr.error = f"Invalid date format: {txn.date}"
-            return wr
-
-        # Validate payee name
-        if not txn.payee_name.strip():
-            wr.status = "dry_run_error"
-            wr.error = "Payee name is required"
-            return wr
-
-        return wr
+    # ------------------------------------------------------------------
+    # Validation
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def _generate_import_id(
-        txn: WriteTransaction, occurrence: int = 1, batch_id: Optional[str] = None,
-    ) -> str:
-        """
-        Generate a deterministic import_id for deduplication (FR-9.3).
-        YNAB uses import_id to prevent duplicates on repeated imports.
-        Includes batch_id so that re-importing a CSV (new batch) after
-        deleting transactions in YNAB produces fresh import_ids.
-        The occurrence counter distinguishes transactions that share the
-        same date/amount/payee/memo (e.g. two identical purchases on one day).
-        """
-        raw = f"{txn.date}:{txn.amount:.2f}:{txn.payee_name}:{txn.memo[:50]}"
-        if batch_id:
-            raw += f":{batch_id}"
-        digest = hashlib.md5(raw.encode()).hexdigest()[:8]
-        return f"YF:{digest}:{occurrence}"
+    def _persist_blocked(items: List[tuple]) -> None:
+        """Keep local failures visible on the row (separately from review status) across reloads."""
+        for wr, row, _ in items:
+            if wr.status in ("error", "unresolved") and row.write_state not in COMPLETED:
+                row.write_state, row.write_error = wr.status, wr.error or ""
+
+    @staticmethod
+    def _fail(wr: WriteResult, message: str, dry: bool) -> None:
+        wr.status = "dry_run_error" if dry else "error"
+        wr.error = message
+
+    def _precheck(self, plan: Plan, wr: WriteResult, row: ImportRow, ov: RowOverride, dry: bool, fresh_msg: str) -> None:
+        rec = row.source_record
+        if row.write_state in COMPLETED:
+            wr.status, wr.ynab_transaction_id = "existing", row.ynab_transaction_id
+            wr.error = row.reconciliation_note or "Already in YNAB."
+            return
+        account = self.db.query(Account).filter(Account.id == rec.account_id).first()
+        if account is None or account.plan_id != plan.id:
+            return self._fail(wr, f"Account not found in this plan: {rec.account_id}", dry)
+        if row.batch is not None and row.batch.plan_id != plan.id:
+            return self._fail(wr, "Row belongs to a different plan.", dry)
+        try:
+            datetime.strptime(rec.date, "%Y-%m-%d")
+        except ValueError:
+            return self._fail(wr, f"Invalid date format: {rec.date}", dry)
+        if row.transfer_state != "resolved" and not (ov.payee_name or "").strip():
+            return self._fail(wr, "Payee name is required", dry)
+        reason = block_reason(row)
+        if reason:
+            wr.status = "dry_run_error" if dry else "unresolved"
+            wr.error = reason if not fresh_msg or row.reconciliation_state != "unverified" else fresh_msg
+            return
+        if row.transfer_state == "resolved":
+            source = self.db.get(Account, row.transfer_account_id) if row.transfer_account_id else None
+            if source is None or transfer_payee_for(self.db, plan.id, source) is None:
+                return self._fail(wr, "Repayment has no valid transfer account.", dry)
+
+    # ------------------------------------------------------------------
+    # Claims and payloads
+    # ------------------------------------------------------------------
+
+    def _claim(self, rec: SourceRecord, token: str) -> bool:
+        stmt = (
+            update(SourceRecord)
+            .where(SourceRecord.id == rec.id, SourceRecord.write_state.in_(("unsent", "error")))
+            .values(write_state="claimed", claim_token=token, claimed_at=datetime.utcnow(), last_error="")
+        )
+        claimed = self.db.execute(stmt).rowcount == 1
+        if claimed:
+            self.db.refresh(rec)
+        return claimed
+
+    def _build_payload(self, plan: Plan, row: ImportRow, ov: RowOverride) -> dict:
+        rec = row.source_record
+        account = self.db.query(Account).filter(Account.id == rec.account_id).first()
+        payload = {
+            "account_id": account.ynab_account_id,
+            "date": rec.date,
+            "amount": int(rec.amount_milliunits),
+            "memo": (ov.memo or row.edited_memo or row.original_memo or "")[:YNAB_MEMO_LIMIT],
+            "cleared": ov.cleared or "uncleared",
+            "approved": False,
+            "import_id": rec.import_id,
+        }
+        if ov.flag_color:
+            payload["flag_color"] = ov.flag_color
+        if row.transfer_state == "resolved":
+            payee = transfer_payee_for(self.db, plan.id, self.db.get(Account, row.transfer_account_id))
+            payload["payee_id"] = payee.ynab_payee_id
+            payload["category_id"] = None           # transfers carry no ordinary category
+            return payload
+        payee_id = self._resolve_payee_id(plan.id, ov.payee_name)
+        if payee_id:
+            payload["payee_id"] = payee_id
+        else:
+            payload["payee_name"] = ov.payee_name
+        # Explicit null stops YNAB auto-assigning a category from payee history
+        payload["category_id"] = self._resolve_category_id(plan.id, ov.category_name)
+        return payload
+
+    # ------------------------------------------------------------------
+    # Sending and outcome correlation
+    # ------------------------------------------------------------------
+
+    def _send(self, plan: Plan, payloads: List[tuple]) -> None:
+        body = [p for _, _, p in payloads]
+        try:
+            logger.info("Sending %d transactions to YNAB", len(body))
+            response = self.ynab.create_transactions(plan.ynab_plan_id, body)
+        except YNABAPIError as exc:
+            uncertain = exc.status_code is None or exc.status_code >= 500
+            for wr, row, _ in payloads:
+                self._finish(wr, row, "unresolved" if uncertain else "error", error=str(exc))
+            return
+        except httpx.HTTPError as exc:       # timeouts and transport failures prove nothing
+            for wr, row, _ in payloads:
+                self._finish(wr, row, "unresolved", error=f"No confirmed response from YNAB ({type(exc).__name__}).")
+            return
+
+        outcomes = self._correlate(plan, response, [(wr.import_id) for wr, _, _ in payloads])
+        for wr, row, _ in payloads:
+            status, ynab_id, error = outcomes[wr.import_id]
+            self._finish(wr, row, status, ynab_id=ynab_id, error=error)
+
+    def _correlate(self, plan: Plan, response: dict, import_ids: List[str]) -> Dict[str, tuple]:
+        txns = list(response.get("transactions") or [])
+        if not txns and response.get("transaction"):
+            txns = [response["transaction"]]
+        by_import: Dict[str, str] = {}
+        repeated = set()
+        for t in txns:
+            iid = t.get("import_id")
+            if not iid:
+                continue
+            if iid in by_import:
+                repeated.add(iid)
+            by_import[iid] = t.get("id")
+        # ID-only responses: read each transaction to learn its import_id (no positional zip)
+        if not txns and response.get("transaction_ids"):
+            for tid in response["transaction_ids"]:
+                try:
+                    t = self.ynab.get_transaction(plan.ynab_plan_id, tid).get("transaction", {})
+                except Exception as exc:       # leave unmapped -> unresolved
+                    logger.warning("Could not read created transaction %s: %s", tid, exc)
+                    continue
+                iid = t.get("import_id")
+                if iid:
+                    if iid in by_import:
+                        repeated.add(iid)
+                    by_import[iid] = t.get("id") or tid
+        dups = Counter(response.get("duplicate_import_ids") or [])
+        wanted = Counter(import_ids)
+        out: Dict[str, tuple] = {}
+        for iid in import_ids:
+            if wanted[iid] > 1 or iid in repeated or (iid in by_import and dups[iid]):
+                out[iid] = ("unresolved", None, "Contradictory or repeated YNAB response for this import ID.")
+            elif iid in by_import:
+                out[iid] = ("created", by_import[iid], None)
+            elif dups[iid] == 1:
+                out[iid] = ("existing", None, "Duplicate: already exists in YNAB")
+            else:
+                out[iid] = ("unresolved", None, "YNAB did not report an outcome for this import ID.")
+        return out
+
+    def _finish(self, wr: WriteResult, row: ImportRow, status: str, ynab_id: Optional[str] = None, error: Optional[str] = None) -> None:
+        rec = row.source_record
+        wr.status, wr.error = status, error
+        wr.ynab_transaction_id = ynab_id
+        rec.claim_token = None
+        if status == "created":
+            rec.write_state, rec.ynab_transaction_id, rec.reconciliation_state = "created", ynab_id, "linked"
+            row.write_state, row.ynab_transaction_id, row.write_error = "created", ynab_id, ""
+        elif status == "existing":
+            rec.write_state, rec.reconciliation_state = "existing", "linked"
+            row.write_state, row.write_error = "existing", ""
+        elif status == "unresolved":
+            rec.write_state, rec.last_error = "reconcile_required", error or ""
+            row.write_state, row.write_error = "unresolved", error or ""
+        else:
+            rec.write_state, rec.last_error = "error", error or ""
+            row.write_state, row.write_error = "error", error or ""
+        self.db.commit()
+
+    @staticmethod
+    def _tally(result: WriteBackResult) -> None:
+        counts = Counter(r.status for r in result.results)
+        result.created = counts["created"]
+        result.existing = counts["existing"]
+        result.errors = counts["error"] + counts["dry_run_error"]
+        result.unresolved = counts["unresolved"]
+
+    # ------------------------------------------------------------------
 
     def _resolve_payee_id(self, plan_id: str, payee_name: str) -> Optional[str]:
-        """Look up the YNAB payee ID from the local database."""
         if not payee_name:
             return None
         payee = (
             self.db.query(Payee)
-            .filter(Payee.plan_id == plan_id, Payee.name == payee_name, Payee.deleted == False)
+            .filter(Payee.plan_id == plan_id, Payee.name == payee_name, Payee.deleted == False)  # noqa: E712
             .first()
         )
         return payee.ynab_payee_id if payee else None
 
     def _resolve_category_id(self, plan_id: str, category_name: str) -> Optional[str]:
-        """Look up the YNAB category ID from the local database."""
         if not category_name:
             return None
         cat = (
             self.db.query(Category)
             .join(Category.category_group)
-            .filter(
-                CategoryGroup.plan_id == plan_id,
-                Category.name == category_name,
-                Category.deleted == False,
-            )
+            .filter(CategoryGroup.plan_id == plan_id, Category.name == category_name, Category.deleted == False)  # noqa: E712
             .first()
         )
         return cat.ynab_category_id if cat else None

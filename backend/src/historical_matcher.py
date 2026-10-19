@@ -13,13 +13,53 @@ from sqlalchemy.orm import Session
 from src.models import Transaction, Payee, Category
 from src.normalizer import normalize
 
+# Contextual fallback evidence is capped below auto-acceptance (0.95).
+SAME_SIGN_FALLBACK_CAP = 0.90
+ANY_SIGN_FALLBACK_CAP = 0.70
+
 
 @dataclass
 class HistoricalMatch:
     payee: Optional[str]
     category: Optional[str]
-    confidence: float          # 0.0 – 1.0
+    confidence: float          # aggregate: min over the targets present; 0.0 – 1.0
     source_type: str           # "exact" | "fuzzy"
+    payee_confidence: float = 0.0
+    category_confidence: float = 0.0
+    conflict: bool = False     # competing labels in the evidence set
+    context: str = ""          # "account+sign" | "sign" | "any" | "" (fuzzy)
+    evidence_count: int = 0
+    amount_similarity: float = 0.0
+    explanation: str = ""
+
+
+@dataclass
+class _Entry:
+    """One exact-index entry."""
+    payee: Optional[str]
+    category: Optional[str]
+    account_id: str
+    sign: int
+    amount: float
+
+
+def _sign(amount: float) -> int:
+    return 1 if amount >= 0 else -1
+
+
+def _target_confidence(labels: List[str]) -> Tuple[Optional[str], float, bool]:
+    """Winning label, share-times-frequency confidence, and whether labels conflict.
+
+    confidence = winning share * min(1, 0.85 + 0.05 * winning_count); ties resolve
+    deterministically to the lexicographically smallest label.
+    """
+    if not labels:
+        return None, 0.0, False
+    counts = Counter(labels)
+    top = max(counts.values())
+    winner = sorted(label for label, n in counts.items() if n == top)[0]
+    share = top / len(labels)
+    return winner, round(share * min(1.0, 0.85 + 0.05 * top), 4), len(counts) > 1
 
 
 @dataclass
@@ -27,7 +67,7 @@ class _CachedTxn:
     """Pre-computed data for a historical transaction."""
     cleaned_memo: str
     merchant_stem: str
-    amount: float
+    amount: float              # currency units
     account_id: str
     payee_name: Optional[str]
     category_name: Optional[str]
@@ -56,8 +96,8 @@ class HistoricalMatcher:
         self.db = db
         self.plan_id = plan_id
         self._cache: List[_CachedTxn] = []
-        # Exact match lookup: upper(cleaned_memo) -> list of (payee, category) pairs
-        self._exact_index: Dict[str, List[Tuple[Optional[str], Optional[str]]]] = defaultdict(list)
+        # Exact match lookup: upper(cleaned_memo) -> entries with account/sign context
+        self._exact_index: Dict[str, List[_Entry]] = defaultdict(list)
         self._build_cache()
 
     def _build_cache(self):
@@ -94,14 +134,20 @@ class HistoricalMatcher:
             norm = normalize(txn.memo or "")
             memo_upper = norm.cleaned_memo.upper()
 
+            # Currency units: prefer integer milliunits, else legacy milliunit column
+            milli = txn.amount_milliunits if txn.amount_milliunits is not None else txn.amount
+            amount_units = float(milli or 0) / 1000.0
+
             # Build exact index
-            self._exact_index[memo_upper].append((payee_name, cat_name))
+            self._exact_index[memo_upper].append(
+                _Entry(payee_name, cat_name, txn.account_id or "", _sign(amount_units), amount_units)
+            )
 
             # Build fuzzy cache
             self._cache.append(_CachedTxn(
                 cleaned_memo=norm.cleaned_memo,
                 merchant_stem=norm.merchant_stem,
-                amount=txn.amount or 0,
+                amount=amount_units,
                 account_id=txn.account_id or "",
                 payee_name=payee_name,
                 category_name=cat_name,
@@ -116,7 +162,7 @@ class HistoricalMatcher:
         account_id: str = "",
     ) -> Optional[HistoricalMatch]:
         """Try exact first, then fuzzy."""
-        result = self._exact_match(normalized_memo)
+        result = self._exact_match(normalized_memo, amount, account_id)
         if result:
             return result
         return self._fuzzy_match(normalized_memo, merchant_stem, amount, account_id)
@@ -125,26 +171,57 @@ class HistoricalMatcher:
     # FR-5.1  Exact historical lookup
     # ------------------------------------------------------------------
 
-    def _exact_match(self, normalized_memo: str) -> Optional[HistoricalMatch]:
+    def _exact_match(
+        self, normalized_memo: str, amount: float = 0.0, account_id: str = "",
+    ) -> Optional[HistoricalMatch]:
         """
         Find transactions whose memo normalizes to exactly the same string.
-        Pick the most common payee/category pair. O(1) lookup.
+        Prefer same-account, same-sign evidence; broader evidence is a capped
+        contextual fallback. Confidence is computed per target and reflects
+        competing labels.
         """
-        matches = self._exact_index.get(normalized_memo.upper())
-        if not matches:
+        entries = self._exact_index.get(normalized_memo.upper())
+        if not entries:
             return None
 
-        # Most common pair wins
-        most_common = Counter(matches).most_common(1)[0]
-        payee, category = most_common[0]
-        count = most_common[1]
-        confidence = min(1.0, 0.85 + 0.05 * count)  # Boost with frequency
+        sign = _sign(amount)
+        same_sign = [e for e in entries if e.sign == sign]
+        if account_id:
+            scoped = [e for e in same_sign if e.account_id == account_id]
+        else:
+            scoped = same_sign  # no account context to compare against
+        if scoped:
+            chosen, context, cap = scoped, ("account+sign" if account_id else "sign"), 1.0
+        elif same_sign:
+            chosen, context, cap = same_sign, "sign", SAME_SIGN_FALLBACK_CAP
+        else:
+            chosen, context, cap = entries, "any", ANY_SIGN_FALLBACK_CAP
 
+        payee, payee_conf, payee_conflict = _target_confidence([e.payee for e in chosen if e.payee])
+        category, cat_conf, cat_conflict = _target_confidence([e.category for e in chosen if e.category])
+        payee_conf = min(payee_conf, cap) if payee else 0.0
+        cat_conf = min(cat_conf, cap) if category else 0.0
+        present = [c for c, v in ((payee_conf, payee), (cat_conf, category)) if v]
+        if not present:
+            return None
+
+        conflict = payee_conflict or cat_conflict
+        similar = sum(
+            1 for e in chosen
+            if e.amount != 0 and amount != 0 and 0.5 <= abs(amount) / abs(e.amount) <= 2.0
+        ) / len(chosen)
+        explanation = f"Exact match in transaction history ({context} context, {len(chosen)} example(s))."
+        if conflict:
+            explanation += " Conflicting history: " + ", ".join(
+                f"{label} x{n}" for label, n in Counter(
+                    [e.category or e.payee for e in chosen]).most_common()) + "."
+        if cap < 1.0:
+            explanation += " Capped because no same-account evidence exists."
         return HistoricalMatch(
-            payee=payee,
-            category=category,
-            confidence=confidence,
-            source_type="exact",
+            payee=payee, category=category, confidence=min(present), source_type="exact",
+            payee_confidence=payee_conf, category_confidence=cat_conf, conflict=conflict,
+            context=context, evidence_count=len(chosen), amount_similarity=round(similar, 3),
+            explanation=explanation,
         )
 
     # ------------------------------------------------------------------
@@ -188,11 +265,16 @@ class HistoricalMatcher:
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best_payee, best_cat = scored[0]
 
+        confidence = round(best_score, 3)
         return HistoricalMatch(
             payee=best_payee,
             category=best_cat,
-            confidence=round(best_score, 3),
+            confidence=confidence,
             source_type="fuzzy",
+            payee_confidence=confidence if best_payee else 0.0,
+            category_confidence=confidence if best_cat else 0.0,
+            evidence_count=1,
+            explanation=f"Fuzzy match (confidence: {confidence:.0%}).",
         )
 
     @staticmethod
@@ -219,8 +301,8 @@ class HistoricalMatcher:
             elif 0.2 <= ratio <= 5.0:
                 bucket_match = 0.5
 
-        # Account match (weight 0.1)
-        account_match = 1.0 if account1 == account2 else 0.0
+        # Account match (weight 0.1): missing account IDs never count as agreement
+        account_match = 1.0 if (account1 and account2 and account1 == account2) else 0.0
 
         return (
             0.4 * memo_sim

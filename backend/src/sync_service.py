@@ -3,6 +3,17 @@ from sqlalchemy.orm import Session
 from src.ynab_client import YnabClient
 from src.models import Plan, Account, CategoryGroup, Category, Payee, Transaction
 
+
+def _int_milliunits(value):
+    """YNAB amounts are integer milliunits; reject anything else."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
 class SyncService:
     def __init__(self, db: Session, ynab_client: YnabClient):
         self.db = db
@@ -155,6 +166,10 @@ class SyncService:
                       ynab_transaction_id=ynab_txn_id,
                       date=txn_data.get("date"),
                       amount=txn_data.get("amount"),
+                      amount_milliunits=_int_milliunits(txn_data.get("amount")),
+                      import_id=txn_data.get("import_id"),
+                      transfer_account_ynab_id=txn_data.get("transfer_account_id"),
+                      transfer_transaction_ynab_id=txn_data.get("transfer_transaction_id"),
                       memo=txn_data.get("memo"),
                       cleared=txn_data.get("cleared"),
                       approved=txn_data.get("approved", False),
@@ -168,6 +183,10 @@ class SyncService:
                   txn.category_id = category_id
                   txn.date = txn_data.get("date")
                   txn.amount = txn_data.get("amount")
+                  txn.amount_milliunits = _int_milliunits(txn_data.get("amount"))
+                  txn.import_id = txn_data.get("import_id")
+                  txn.transfer_account_ynab_id = txn_data.get("transfer_account_id")
+                  txn.transfer_transaction_ynab_id = txn_data.get("transfer_transaction_id")
                   txn.memo = txn_data.get("memo")
                   txn.cleared = txn_data.get("cleared")
                   txn.approved = txn_data.get("approved", False)

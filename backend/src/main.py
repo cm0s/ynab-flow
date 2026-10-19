@@ -1,3 +1,4 @@
+import json
 import os
 from threading import Lock
 from dataclasses import asdict
@@ -16,10 +17,14 @@ from src.normalizer import normalize
 from src.rule_engine import RuleEngine
 from src.orchestrator import Orchestrator
 from src.ml_classifier import MLClassifier
-from src.csv_service import CSVTransaction, parse_csv, bulk_predict
-from src.write_back_service import WriteBackService, WriteTransaction
+from src.csv_service import CSVTransaction, CSVFormatError, parse_import, bulk_predict
+from src.write_back_service import WriteBackService, RowOverride, recover_stale_claims
 from src.transfer_detector import detect_transfer
-from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow
+from src.identity import allocate_occurrences, add_confirmed_occurrence, IdentityCollision, canonical_evidence
+from src.reconciliation import (
+    COMPLETED, refresh_history, reconcile_rows, suggest_transfer_accounts, transfer_payee_for,
+)
+from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow, SourceRecord
 from src.auth import verify_token, validate_auth_config
 
 validate_auth_config()
@@ -36,6 +41,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def recover_interrupted_writes():
+    """A restart abandons in-flight writes: their outcome must be reconciled before any resend."""
+    from src.database import SessionLocal
+    db = SessionLocal()
+    try:
+        recover_stale_claims(db, older_than=None)
+    except Exception as e:  # e.g. database not migrated yet
+        print(f"Claim recovery skipped: {e}")
+    finally:
+        db.close()
+
 
 @app.on_event("startup")
 def auto_train_models():
@@ -281,6 +299,13 @@ def predict_transaction(req: PredictRequest, db: Session = Depends(get_db), _use
         "explanation": result.explanation,
         "review_required": result.review_required,
         "flag_ignore": result.flag_ignore,
+        "payee_confidence": result.payee_confidence,
+        "category_confidence": result.category_confidence,
+        "payee_source": result.payee_source,
+        "category_source": result.category_source,
+        "payee_explanation": result.payee_explanation,
+        "category_explanation": result.category_explanation,
+        "review_flag": result.review_flag,
     }
 
 @app.post("/train")
@@ -304,11 +329,19 @@ def train_models(plan_id: str, db: Session = Depends(get_db), _user: str = Depen
         training_lock.release()
 
 # ---------------------------------------------------------------------------
-# Phase 5 endpoints
+# Phase 5 endpoints — import batches
 # ---------------------------------------------------------------------------
 
+REVIEW_STATUSES = ("pending", "accepted", "ignored")
+PREDICTION_FIELDS = (
+    "payee", "category", "confidence", "source", "explanation", "review_required", "flag_ignore",
+    "cleaned_memo", "merchant_stem", "payee_confidence", "category_confidence", "payee_source",
+    "category_source", "payee_explanation", "category_explanation", "review_flag",
+)
+
+
 def _batch_rows_to_dicts(rows: list) -> list:
-    """Convert ImportRow list to API response dicts."""
+    """Convert ImportRow list to API response dicts (rows already in YNAB are excluded)."""
     return [
         {
             "id": r.id,
@@ -318,15 +351,37 @@ def _batch_rows_to_dicts(rows: list) -> list:
             "cleaned_memo": r.cleaned_memo,
             "merchant_stem": r.merchant_stem,
             "amount": r.amount,
+            "amount_milliunits": r.amount_milliunits,
+            "currency": r.currency,
             "label": r.label,
             "source_category": r.source_category,
+            "source_format": r.source_format,
+            "source_status": r.source_status,
+            "evidence": json.loads(r.evidence_json or "{}"),
+            "account_id": r.account_id,
+            "source_id": r.source_record_id,
+            "import_id": r.source_record.import_id if r.source_record else None,
             "payee": r.payee,
             "category": r.category,
             "confidence": r.confidence,
+            "payee_confidence": r.payee_confidence,
+            "category_confidence": r.category_confidence,
+            "payee_source": r.payee_source,
+            "category_source": r.category_source,
+            "payee_explanation": r.payee_explanation,
+            "category_explanation": r.category_explanation,
             "source": r.source,
             "explanation": r.explanation,
             "review_required": r.review_required,
+            "review_flag": r.review_flag,
             "flag_ignore": r.flag_ignore,
+            "transfer_state": r.transfer_state,
+            "transfer_account_id": r.transfer_account_id,
+            "reconciliation_state": r.reconciliation_state,
+            "reconciliation_note": r.reconciliation_note,
+            "write_state": r.write_state,
+            "write_error": r.write_error,
+            "ynab_transaction_id": r.ynab_transaction_id,
             "status": r.status,
             "edited_payee": r.edited_payee,
             "edited_category": r.edited_category,
@@ -334,64 +389,138 @@ def _batch_rows_to_dicts(rows: list) -> list:
             "flag_color": r.flag_color,
         }
         for r in sorted(rows, key=lambda r: r.row_index)
+        if r.write_state not in COMPLETED
     ]
+
+
+def _batch_payload(db: Session, batch: ImportBatch) -> dict:
+    account = db.get(Account, batch.account_id) if batch.account_id else None
+    return {
+        "batch_id": batch.id,
+        "filename": batch.filename,
+        "created_at": batch.created_at.isoformat() if batch.created_at else None,
+        "account_id": batch.account_id,
+        "account_name": account.name if account else None,
+        "account_confirmed": bool(batch.account_confirmed),
+        "source_format": batch.source_format,
+        "report": json.loads(batch.report_json or "{}"),
+        "rows": _batch_rows_to_dicts(batch.rows),
+    }
+
+
+def _row_to_txn(r: ImportRow) -> CSVTransaction:
+    """Rebuild the parsed form of a persisted row (immutable evidence + edited-free memo)."""
+    return CSVTransaction(
+        date=r.date, memo=r.original_memo,
+        inflow=r.amount if r.amount >= 0 else None,
+        outflow=-r.amount if r.amount < 0 else None,
+        label=r.label, source_category=r.source_category,
+        amount_milliunits=r.amount_milliunits, currency=r.currency,
+        source_format=r.source_format or "legacy", source_status=r.source_status,
+        evidence=json.loads(r.evidence_json or "{}"),
+    )
+
+
+def _apply_predictions(rows: List[ImportRow], results, keep_transfer: bool = True) -> None:
+    """Write fresh predictions onto rows while preserving user edits and review decisions."""
+    from dataclasses import asdict
+    for import_row, pred in zip(rows, results):
+        d = asdict(pred)
+        user_edited_payee = import_row.edited_payee != (import_row.payee or "")
+        user_edited_category = import_row.edited_category != (import_row.category or "")
+        for name in PREDICTION_FIELDS:
+            setattr(import_row, name, d[name])
+        if not (keep_transfer and import_row.transfer_state in ("resolved", "linked", "ambiguous")):
+            import_row.transfer_state = d["transfer_state"]
+        if not user_edited_payee:
+            import_row.edited_payee = d["payee"] or ""
+        if not user_edited_category:
+            import_row.edited_category = d["category"] or ""
+        if import_row.status != "ignored":
+            auto = not d["review_required"] and not d["flag_ignore"] and import_row.transfer_state == "none"
+            if not user_edited_payee and not user_edited_category:
+                import_row.status = "accepted" if auto else "pending"
+
+
+def _account_for_batch(db: Session, batch: ImportBatch):
+    return db.get(Account, batch.account_id) if batch.account_id else None
 
 
 @app.post("/upload-csv")
 async def upload_csv(
     plan_id: str = Query(...),
+    account_id: str = Query(..., description="Target account (local id) the file belongs to"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     _user: str = Depends(verify_token),
 ):
-    """Upload a bank CSV and get bulk predictions, persisted as an import batch."""
+    """Upload a bank CSV for a target account; predictions and identities are persisted as an import batch."""
     plan = db.query(Plan).filter(Plan.id == plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found.")
+    account = db.query(Account).filter(Account.id == account_id, Account.plan_id == plan_id).first()
+    if not account or account.closed:
+        raise HTTPException(status_code=422, detail="Select an open target account that belongs to this budget before importing.")
 
-    content = (await file.read()).decode("utf-8-sig")
-    transactions = parse_csv(content)
-    results = bulk_predict(db, plan_id, transactions)
+    try:
+        content = (await file.read()).decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=422, detail="The file is not valid UTF-8 text. Export it again as CSV (UTF-8).")
+    try:
+        report = parse_import(content)
+    except CSVFormatError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
-    # Abandon any existing active batch for this plan
+    try:
+        results = bulk_predict(db, plan_id, report.rows, account.id, account.name)
+        allocation = allocate_occurrences(db, plan_id, account.id, report.rows)
+    except IdentityCollision as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
+
+    summary = report.summary()
+    # Ambiguous rows stay visible even when their reused occurrence is done: the user must resolve them
+    kept = [(r, a) for r, a in zip(results, allocation.allocations)
+            if a.state == "ambiguous" or a.record.write_state not in COMPLETED]
+    summary["already_imported"] = len(results) - len(kept)
+    summary["repeated_export"] = allocation.repeated_export
+
+    # Only now replace the active batch: a failed upload never abandons it
     db.query(ImportBatch).filter(
         ImportBatch.plan_id == plan_id, ImportBatch.status == "active"
     ).update({"status": "abandoned"})
-
-    # Create new batch and rows
-    batch = ImportBatch(plan_id=plan_id, filename=file.filename)
+    batch = ImportBatch(
+        plan_id=plan_id, filename=file.filename, account_id=account.id, account_confirmed=True,
+        source_format=report.source_format, report_json=json.dumps(summary),
+        export_signature=allocation.signature, status="active" if kept else "completed",
+    )
     db.add(batch)
     db.flush()
 
-    for r in results:
+    from dataclasses import asdict
+    for index, (r, alloc) in enumerate(kept):
         d = asdict(r)
-        auto_approved = not d["review_required"] and not d["flag_ignore"]
-        row = ImportRow(
-            batch_id=batch.id,
-            row_index=d["row_index"],
-            date=d["date"],
-            original_memo=d["original_memo"],
-            cleaned_memo=d["cleaned_memo"],
-            merchant_stem=d["merchant_stem"],
-            amount=d["amount"],
-            label=d["label"],
+        txn = alloc.txn
+        auto_approved = not d["review_required"] and not d["flag_ignore"] and d["transfer_state"] == "none" and alloc.state == "pending"
+        db.add(ImportRow(
+            batch_id=batch.id, row_index=index, date=d["date"],
+            original_memo=d["original_memo"], amount=d["amount"], label=d["label"],
             source_category=d["source_category"],
-            payee=d["payee"],
-            category=d["category"],
-            confidence=d["confidence"],
-            source=d["source"],
-            explanation=d["explanation"],
-            review_required=d["review_required"],
-            flag_ignore=d["flag_ignore"],
+            **{name: d[name] for name in PREDICTION_FIELDS if name not in ("cleaned_memo", "merchant_stem")},
+            cleaned_memo=d["cleaned_memo"], merchant_stem=d["merchant_stem"],
             status="accepted" if auto_approved else "pending",
-            edited_payee=d["payee"] or "",
-            edited_category=d["category"] or "",
-        )
-        db.add(row)
+            edited_payee=d["payee"] or "", edited_category=d["category"] or "",
+            account_id=account.id, amount_milliunits=txn.amount_milliunits, currency=txn.currency,
+            source_format=txn.source_format, source_status=txn.source_status,
+            evidence_json=json.dumps(txn.evidence, ensure_ascii=False), source_record_id=alloc.record.id,
+            transfer_state=d["transfer_state"],
+            reconciliation_state=alloc.state, reconciliation_note=alloc.note,
+        ))
     db.commit()
+    db.refresh(batch)
 
-    rows_out = _batch_rows_to_dicts(batch.rows)
-    return {"batch_id": batch.id, "count": len(rows_out), "predictions": rows_out}
+    payload = _batch_payload(db, batch)
+    return {**payload, "count": len(payload["rows"]), "predictions": payload["rows"]}
 
 
 class ReclassifyRequest(BaseModel):
@@ -400,14 +529,13 @@ class ReclassifyRequest(BaseModel):
 
 @app.post("/reclassify")
 def reclassify(req: ReclassifyRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
-    """Re-run classification on a persisted import batch."""
+    """Re-run classification on a persisted import batch using its persisted account."""
     plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found.")
 
-    # Find the batch to reclassify
     if req.batch_id:
-        batch = db.query(ImportBatch).filter(ImportBatch.id == req.batch_id).first()
+        batch = db.query(ImportBatch).filter(ImportBatch.id == req.batch_id, ImportBatch.plan_id == req.plan_id).first()
     else:
         batch = db.query(ImportBatch).filter(
             ImportBatch.plan_id == req.plan_id, ImportBatch.status == "active"
@@ -415,53 +543,17 @@ def reclassify(req: ReclassifyRequest, db: Session = Depends(get_db), _user: str
     if not batch:
         raise HTTPException(status_code=404, detail="No active import batch found.")
 
-    import_rows = sorted(batch.rows, key=lambda r: r.row_index)
-    csv_txns = [
-        CSVTransaction(
-            date=r.date, memo=r.original_memo,
-            inflow=r.amount if r.amount >= 0 else None,
-            outflow=-r.amount if r.amount < 0 else None,
-            label=r.label, source_category=r.source_category,
-        )
-        for r in import_rows
-    ]
-    results = bulk_predict(db, req.plan_id, csv_txns)
-
-    # Update import rows with new predictions, preserving user overrides
-    for import_row, pred in zip(import_rows, results):
-        d = asdict(pred)
-        user_edited_payee = import_row.edited_payee != (import_row.payee or "")
-        user_edited_category = import_row.edited_category != (import_row.category or "")
-
-        import_row.payee = d["payee"]
-        import_row.category = d["category"]
-        import_row.confidence = d["confidence"]
-        import_row.source = d["source"]
-        import_row.explanation = d["explanation"]
-        import_row.review_required = d["review_required"]
-        import_row.flag_ignore = d["flag_ignore"]
-        import_row.cleaned_memo = d["cleaned_memo"]
-        import_row.merchant_stem = d["merchant_stem"]
-
-        # Don't overwrite user edits
-        if not user_edited_payee:
-            import_row.edited_payee = d["payee"] or ""
-        if not user_edited_category:
-            import_row.edited_category = d["category"] or ""
-        # Don't change status if user manually set it to ignored
-        if import_row.status != "ignored":
-            auto_approved = not d["review_required"] and not d["flag_ignore"]
-            if not user_edited_payee and not user_edited_category:
-                import_row.status = "accepted" if auto_approved else "pending"
-
+    account = _account_for_batch(db, batch)
+    import_rows = [r for r in sorted(batch.rows, key=lambda r: r.row_index) if r.write_state not in COMPLETED]
+    results = bulk_predict(
+        db, req.plan_id, [_row_to_txn(r) for r in import_rows],
+        account.id if account else "", account.name if account else "",
+    )
+    _apply_predictions(import_rows, results)
     db.commit()
-    rows_out = _batch_rows_to_dicts(batch.rows)
-    return {"batch_id": batch.id, "count": len(rows_out), "predictions": rows_out}
+    payload = _batch_payload(db, batch)
+    return {**payload, "count": len(payload["rows"]), "predictions": payload["rows"]}
 
-
-# ---------------------------------------------------------------------------
-# Import batch management endpoints
-# ---------------------------------------------------------------------------
 
 @app.get("/import-batches/{plan_id}/active")
 def get_active_batch(plan_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
@@ -471,12 +563,7 @@ def get_active_batch(plan_id: str, db: Session = Depends(get_db), _user: str = D
     ).first()
     if not batch:
         raise HTTPException(status_code=404, detail="No active import batch.")
-    return {
-        "batch_id": batch.id,
-        "filename": batch.filename,
-        "created_at": batch.created_at.isoformat() if batch.created_at else None,
-        "rows": _batch_rows_to_dicts(batch.rows),
-    }
+    return _batch_payload(db, batch)
 
 
 class ImportRowUpdate(BaseModel):
@@ -492,11 +579,13 @@ class ImportRowsUpdateRequest(BaseModel):
 
 @app.patch("/import-rows")
 def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
-    """Bulk-save review state changes on import rows."""
+    """Bulk-save review state changes on import rows. Bank evidence is not editable."""
     updated = 0
     for u in req.updates:
+        if u.status is not None and u.status not in REVIEW_STATUSES:
+            raise HTTPException(status_code=422, detail=f"Invalid status '{u.status}'. Use: {', '.join(REVIEW_STATUSES)}.")
         row = db.query(ImportRow).filter(ImportRow.id == u.id).first()
-        if not row:
+        if not row or row.write_state in COMPLETED:
             continue
         if u.status is not None:
             row.status = u.status
@@ -513,15 +602,190 @@ def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_d
     return {"updated": updated}
 
 
+def _retryable(rows: List[ImportRow]) -> List[ImportRow]:
+    """Rows that still need a decision or a (re)try: not in YNAB and not deliberately ignored."""
+    return [r for r in rows if r.write_state not in COMPLETED and r.status != "ignored"]
+
+
 @app.post("/import-batches/{batch_id}/complete")
 def complete_batch(batch_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
-    """Mark an import batch as completed."""
+    """Mark an import batch as completed once every row is handled or ignored."""
     batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found.")
+    remaining = _retryable(batch.rows)
+    if remaining:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{len(remaining)} row(s) are not yet in YNAB or ignored. Retry or ignore them before completing the batch.",
+        )
     batch.status = "completed"
     db.commit()
     return {"status": "completed"}
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation, repayment routing and account reassignment
+# ---------------------------------------------------------------------------
+
+def _row_view(row: ImportRow) -> dict:
+    """API view of one row (rows already in YNAB only report their write state)."""
+    if row.write_state in COMPLETED:
+        return {"id": row.id, "write_state": row.write_state, "ynab_transaction_id": row.ynab_transaction_id}
+    return _batch_rows_to_dicts([row])[0]
+
+
+def _owned_row(db: Session, row_id: str) -> ImportRow:
+    row = db.query(ImportRow).filter(ImportRow.id == row_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Import row not found.")
+    return row
+
+
+def _reconcile_batch_rows(db: Session, batch: ImportBatch, rows: List[ImportRow], client: YnabClient) -> Optional[str]:
+    plan = db.get(Plan, batch.plan_id)
+    fresh, message = refresh_history(db, plan, client)
+    reconcile_rows(db, plan, rows, fresh)
+    db.commit()
+    return None if fresh else message
+
+
+@app.post("/import-batches/{batch_id}/reconcile")
+def reconcile_batch(
+    batch_id: str,
+    db: Session = Depends(get_db),
+    client: YnabClient = Depends(get_ynab_client),
+    _user: str = Depends(verify_token),
+):
+    """Refresh YNAB history and update reconciliation / repayment state on pending rows."""
+    batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    warning = _reconcile_batch_rows(db, batch, [r for r in batch.rows if r.write_state not in COMPLETED], client)
+    suggestions = suggest_transfer_accounts(db, batch.plan_id, batch.account_id) if batch.account_id else []
+    linked = sum(1 for r in batch.rows if r.reconciliation_state == "linked" and r.write_state in COMPLETED)
+    return {**_batch_payload(db, batch), "warning": warning, "transfer_account_suggestions": suggestions,
+            "linked_count": linked}
+
+
+class RowResolution(BaseModel):
+    action: str  # link_existing | confirm_new | confirm_same
+    ynab_transaction_id: Optional[str] = None
+
+@app.post("/import-rows/{row_id}/resolve")
+def resolve_row(row_id: str, req: RowResolution, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Resolve a reconciliation block without touching immutable bank values."""
+    row = _owned_row(db, row_id)
+    rec = row.source_record
+    if rec is None or row.write_state in COMPLETED:
+        raise HTTPException(status_code=409, detail="This row has nothing to resolve.")
+    if req.action == "link_existing":
+        txn = db.query(Transaction).filter(
+            Transaction.ynab_transaction_id == (req.ynab_transaction_id or ""),
+            Transaction.plan_id == rec.plan_id, Transaction.account_id == rec.account_id,
+            Transaction.deleted == False,  # noqa: E712
+        ).first()
+        if txn is None:
+            raise HTTPException(status_code=422, detail="No live YNAB transaction with that id exists on the target account.")
+        taken = db.query(SourceRecord).filter(
+            SourceRecord.ynab_transaction_id == txn.ynab_transaction_id, SourceRecord.id != rec.id).first()
+        if taken:
+            raise HTTPException(status_code=409, detail="That YNAB transaction is already linked to another source row.")
+        rec.ynab_transaction_id = txn.ynab_transaction_id
+        rec.write_state = "existing"
+        rec.reconciliation_state = "linked"
+        row.reconciliation_state, row.write_state = "linked", "existing"
+        row.ynab_transaction_id = txn.ynab_transaction_id
+        row.reconciliation_note = "Linked by user."
+    elif req.action == "confirm_new":
+        if row.reconciliation_state in ("unverified", "quarantined", "legacy_unresolved"):
+            raise HTTPException(status_code=409, detail="Refresh YNAB history and confirm the account before marking this row as new.")
+        if row.reconciliation_state in ("ambiguous", "deleted_link"):
+            # A new purchase / recreation needs its own occurrence and import ID
+            new_rec = add_confirmed_occurrence(db, rec)
+            row.source_record_id = new_rec.id
+            rec = new_rec
+        rec.reconciliation_state = row.reconciliation_state = "confirmed_new"
+        row.reconciliation_note = "Confirmed by user as a distinct transaction."
+    elif req.action == "confirm_same":
+        if row.reconciliation_state != "ambiguous":
+            raise HTTPException(status_code=409, detail="Only ambiguous rows can be confirmed as a repeat.")
+        row.reconciliation_state, row.reconciliation_note = "pending", "Confirmed by user as the previously seen purchase."
+        if rec.write_state in COMPLETED:
+            row.write_state, row.ynab_transaction_id = rec.write_state, rec.ynab_transaction_id
+    else:
+        raise HTTPException(status_code=422, detail="Invalid action. Use: link_existing, confirm_new, confirm_same.")
+    db.commit()
+    return _row_view(row)
+
+
+class TransferRouting(BaseModel):
+    account_id: Optional[str] = None  # local id of the paying account; null keeps the repayment unresolved
+
+@app.post("/import-rows/{row_id}/transfer")
+def route_transfer(
+    row_id: str, req: TransferRouting,
+    db: Session = Depends(get_db),
+    client: YnabClient = Depends(get_ynab_client),
+    _user: str = Depends(verify_token),
+):
+    """Choose (or clear) the account a repayment was paid from."""
+    row = _owned_row(db, row_id)
+    rec = row.source_record
+    if rec is None or row.transfer_state == "none" or row.write_state in COMPLETED:
+        raise HTTPException(status_code=409, detail="This row is not an unresolved repayment.")
+    if req.account_id:
+        source = db.query(Account).filter(
+            Account.id == req.account_id, Account.plan_id == rec.plan_id).first()
+        if not source or source.closed or source.id == rec.account_id:
+            raise HTTPException(status_code=422, detail="Choose another open account in this budget.")
+        if transfer_payee_for(db, rec.plan_id, source) is None:
+            raise HTTPException(status_code=422, detail=f"YNAB has no transfer payee for {source.name}; sync and retry.")
+    row.transfer_account_id = req.account_id
+    if row.transfer_state == "resolved":
+        row.transfer_state = "candidate"
+    batch = row.batch
+    warning = _reconcile_batch_rows(db, batch, [row], client)
+    return {**_row_view(row), "warning": warning}
+
+
+class ReassignRequest(BaseModel):
+    account_id: str
+
+@app.post("/import-batches/{batch_id}/reassign-account")
+def reassign_account(batch_id: str, req: ReassignRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Explicitly (re)assign the batch's target account; identities and predictions are recomputed."""
+    batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    account = db.query(Account).filter(Account.id == req.account_id, Account.plan_id == batch.plan_id).first()
+    if not account or account.closed:
+        raise HTTPException(status_code=422, detail="Choose an open account that belongs to this budget.")
+    rows = [r for r in sorted(batch.rows, key=lambda r: r.row_index) if r.write_state not in COMPLETED]
+    if any(r.source_record and r.source_record.write_state in ("claimed", "reconcile_required") for r in rows):
+        raise HTTPException(status_code=409, detail="A write is in progress or unresolved; reconcile it before changing the account.")
+    movable = [r for r in rows if r.amount_milliunits is not None]
+    txns = [_row_to_txn(r) for r in movable]
+    try:
+        allocation = allocate_occurrences(db, batch.plan_id, account.id, txns)
+    except IdentityCollision as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
+    results = bulk_predict(db, batch.plan_id, txns, account.id, account.name)
+    for row, alloc in zip(movable, allocation.allocations):
+        row.account_id = account.id
+        row.source_record_id = alloc.record.id
+        row.reconciliation_state = alloc.state
+        row.reconciliation_note = alloc.note
+        row.transfer_account_id = None if row.transfer_account_id == account.id else row.transfer_account_id
+        if row.transfer_state in ("resolved", "linked", "ambiguous"):
+            row.transfer_state = "candidate"
+        if alloc.record.write_state in COMPLETED and alloc.state != "ambiguous":
+            row.write_state, row.ynab_transaction_id = alloc.record.write_state, alloc.record.ynab_transaction_id
+    _apply_predictions(movable, results, keep_transfer=False)
+    batch.account_id, batch.account_confirmed = account.id, True
+    db.commit()
+    return _batch_payload(db, batch)
 
 
 @app.put("/rules/{rule_id}")
@@ -607,25 +871,30 @@ def list_payees(plan_id: str, db: Session = Depends(get_db), _user: str = Depend
 # Phase 8 endpoints — YNAB Write-Back
 # ---------------------------------------------------------------------------
 
-class WriteBackTransactionItem(BaseModel):
-    date: str
-    amount: float
-    payee_name: str
+class WriteBackRowItem(BaseModel):
+    """Reference to a persisted import row plus the only values a caller may edit."""
+    row_id: str
+    payee_name: str = ""
     category_name: str = ""
     memo: str = ""
-    account_id: str
-    cleared: str = "uncleared"
     flag_color: Optional[str] = None
+    cleared: str = "uncleared"
 
 class WriteBackRequest(BaseModel):
     plan_id: str
     mode: str = "dry_run"  # "dry_run" | "create" | "create_or_skip"
-    transactions: List[WriteBackTransactionItem]
+    rows: List[WriteBackRowItem] = []
     batch_id: Optional[str] = None
+    transactions: Optional[List[dict]] = None  # legacy standalone payloads: rejected with guidance
 
 @app.post("/write-back")
-def write_back(req: WriteBackRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
-    """Push approved transactions to YNAB (FR-9)."""
+def write_back(
+    req: WriteBackRequest,
+    db: Session = Depends(get_db),
+    client: YnabClient = Depends(get_ynab_client),
+    _user: str = Depends(verify_token),
+):
+    """Push persisted import rows to YNAB (FR-9). Amount, date, account and identity come from the server."""
     plan = db.query(Plan).filter(Plan.id == req.plan_id).first()
     if not plan:
         raise HTTPException(status_code=404, detail="Plan not found.")
@@ -633,41 +902,54 @@ def write_back(req: WriteBackRequest, db: Session = Depends(get_db), _user: str 
     if req.mode not in ("dry_run", "create", "create_or_skip"):
         raise HTTPException(status_code=400, detail="Invalid mode. Use: dry_run, create, create_or_skip.")
 
-    client = get_ynab_client()
-    service = WriteBackService(db, client)
-
-    txns = [
-        WriteTransaction(
-            date=t.date,
-            amount=t.amount,
-            payee_name=t.payee_name,
-            category_name=t.category_name,
-            memo=t.memo,
-            account_id=t.account_id,
-            cleared=t.cleared,
-            flag_color=t.flag_color,
+    if req.transactions:
+        raise HTTPException(
+            status_code=422,
+            detail="Standalone transaction payloads are no longer accepted. Import the CSV first, then send "
+                   "{\"rows\": [{\"row_id\": ...}]} referencing the persisted import rows.",
         )
-        for t in req.transactions
-    ]
 
-    result = service.execute(req.plan_id, txns, mode=req.mode, batch_id=req.batch_id)
+    rows, overrides = [], {}
+    for item in req.rows:
+        row = db.query(ImportRow).filter(ImportRow.id == item.row_id).first()
+        if row is None or row.batch is None or row.batch.plan_id != req.plan_id:
+            raise HTTPException(status_code=403, detail=f"Row {item.row_id} does not belong to this budget.")
+        if req.batch_id and row.batch_id != req.batch_id:
+            raise HTTPException(status_code=403, detail=f"Row {item.row_id} is not part of batch {req.batch_id}.")
+        if not row.batch.account_confirmed or row.account_id is None:
+            raise HTTPException(
+                status_code=409,
+                detail="This batch predates account selection. Confirm its target account (reassign) before writing.",
+            )
+        rows.append(row)
+        overrides[row.id] = RowOverride(
+            payee_name=item.payee_name, category_name=item.category_name, memo=item.memo,
+            flag_color=item.flag_color, cleared=item.cleared,
+        )
+
+    service = WriteBackService(db, client)
+    result = service.execute(req.plan_id, rows, overrides, mode=req.mode)
 
     return {
         "mode": result.mode,
         "total": result.total,
         "created": result.created,
-        "skipped": result.skipped,
+        "existing": result.existing,
         "errors": result.errors,
+        "unresolved": result.unresolved,
         "results": [
             {
                 "index": r.index,
+                "row_id": r.row_id,
+                "source_id": r.source_id,
+                "import_id": r.import_id,
                 "date": r.date,
                 "payee_name": r.payee_name,
                 "amount": r.amount,
+                "amount_milliunits": r.amount_milliunits,
                 "status": r.status,
                 "ynab_transaction_id": r.ynab_transaction_id,
                 "error": r.error,
-                "import_id": r.import_id,
             }
             for r in result.results
         ],
