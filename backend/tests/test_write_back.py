@@ -268,3 +268,20 @@ def test_dry_run_does_not_persist_links_or_completion(env):
     r = env.db.query(ImportRow).one()
     env.db.refresh(r)
     assert r.write_state == "unsent" and env.db.query(SourceRecord).one().write_state == "unsent"
+
+
+def test_accepted_prediction_stays_on_the_record_after_creation(env):
+    from src.models import Rule
+    env.db.add(Rule(plan_id="plan-1", name="Shop", priority=1, match_type="contains", pattern="SHOP ONE",
+                    assign_payee="Shop", assign_category="Groceries"))
+    env.db.commit()
+    _, rows = upload(env, SHOP)
+    assert (rows[0]["payee"], rows[0]["category"]) == ("Shop", "Groceries")
+    env.client.patch("/import-rows", json={"updates": [{"id": rows[0]["id"], "status": "accepted"}]})
+    assert env.write([env.row_ref(rows[0], payee_name="Shop", category_name="Groceries")]).json()["created"] == 1
+    sent = env.post_bodies[0]["transactions"][0]
+    assert sent["approved"] is False and sent["category_id"] == "y-c1"
+    stored = env.db.query(ImportRow).filter_by(id=rows[0]["id"]).one()
+    env.db.refresh(stored)
+    assert (stored.payee, stored.category, stored.status) == ("Shop", "Groceries", "accepted")
+    assert stored.write_state == "created" and stored.ynab_transaction_id
