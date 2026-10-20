@@ -110,3 +110,17 @@ def test_reassign_account_rescopes_identity_and_prediction(env):
     assert out["account_id"] == env.post.id and out["rows"][0]["import_id"] != before
     assert env.client.post(f"/import-batches/{up['batch_id']}/reassign-account",
                            json={"account_id": "missing"}).status_code == 422
+
+
+def test_pending_evidence_survives_a_later_posted_export_without_creating_records(env):
+    from src.models import SourceRecord
+    first = env.upload(build([row(desc="Hotel", merchant="Hotel X", amount="80.00", status="Pending")])).json()
+    assert first["count"] == 0 and first["report"]["pending"] == 1
+    pending = first["report"]["pending_rows"][0]
+    later = env.upload(build([row(desc="Hotel", merchant="Hotel X", amount="80.00", status="Posted")])).json()
+    assert later["count"] == 1 and later["report"]["pending"] == 0
+    # the earlier Pending evidence is still stored, and never became an identity or a YNAB write
+    old = env.db.get(ImportBatch, first["batch_id"])
+    stored = json.loads(old.report_json)["pending_rows"][0]
+    assert stored == pending and stored["amount_milliunits"] == later["rows"][0]["amount_milliunits"]
+    assert env.db.query(SourceRecord).count() == 1 and env.post_bodies == []
