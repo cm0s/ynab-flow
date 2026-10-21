@@ -175,3 +175,17 @@ def test_reconcile_endpoint_reports_warning_and_suggestions(env):
     env.history_error = True
     _, body = reconcile(env, out["batch_id"])
     assert body["warning"] and body["rows"][0]["reconciliation_state"] == "unverified"
+
+
+def test_candidates_list_only_linkable_ynab_transactions(env):
+    out, rows = upload(env, COFFEE)
+    env.history.append(env.ynab_txn("other", amount=-4500, memo="Morning coffee"))
+    env.history.append(env.ynab_txn("wrong-amount", amount=-9900, memo="Not this"))
+    reconcile(env, out["batch_id"])
+    got = env.client.get(f"/import-rows/{rows[0]['id']}/candidates").json()["candidates"]
+    assert [c["ynab_transaction_id"] for c in got] == ["other"] and got[0]["memo"] == "Morning coffee"
+    # once linked elsewhere it is no longer offered
+    other_rows = upload(env, dict(COFFEE, desc="Coffee 2"))[1]
+    env.client.post(f"/import-rows/{rows[0]['id']}/resolve", json={"action": "link_existing", "ynab_transaction_id": "other"})
+    assert env.client.get(f"/import-rows/{other_rows[0]['id']}/candidates").json()["candidates"] == []
+    assert env.client.get("/import-rows/missing/candidates").status_code == 404
