@@ -6,6 +6,14 @@ A local-first web application that ingests bank CSVs, syncs historical YNAB tran
 
 This application consists of two parts: a Python backend and a React frontend. Both need to be running simultaneously during development.
 
+### Quick start (both servers)
+
+```bash
+./dev.sh
+```
+
+This applies database migrations, then starts the backend (http://localhost:8000) and the frontend (http://localhost:5173). Press Ctrl+C to stop both. On a first run it also creates the backend virtualenv and installs the frontend dependencies. Copy `backend/.env.example` to `backend/.env` and set `YNAB_API_KEY` first. To run the servers separately, use the steps below.
+
 ### 1. Running the Backend
 
 The backend is built with FastAPI and uses SQLite.
