@@ -42,3 +42,8 @@ def test_blank_merchant_repayment_detected_but_refund_is_not():
     assert not detect_repayment("Refund Shop 1", 43.7, merchant="Shop 1").is_transfer
     assert not detect_repayment("Payment Thank You", -5.0).is_transfer       # debit never a repayment
     assert not detect_repayment("Some Positive Credit", 10.0).is_transfer    # positive alone is not enough
+
+
+def test_real_french_swisscard_repayment_text_is_detected_but_a_paypal_refund_is_not():
+    assert detect_repayment("VOTRE PAIEMENT – MERCI BEAUCOUP", 3014.90, merchant="").is_transfer
+    assert not detect_repayment("PAYPAL *EXAMPLESHOP, 0445759800", 43.70, merchant="PAYPAL *EXAMPLESHOP").is_transfer

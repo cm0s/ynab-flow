@@ -285,3 +285,12 @@ def test_accepted_prediction_stays_on_the_record_after_creation(env):
     env.db.refresh(stored)
     assert (stored.payee, stored.category, stored.status) == ("Shop", "Groceries", "accepted")
     assert stored.write_state == "created" and stored.ynab_transaction_id
+    assert (stored.sent_payee, stored.sent_category) == ("Shop", "Groceries")      # what was actually sent
+
+
+def test_sent_values_are_recorded_even_when_the_request_differs_from_the_stored_row(env):
+    _, rows = upload(env, SHOP)
+    assert env.write([env.row_ref(rows[0], payee_name="Shop", category_name="Groceries")]).json()["created"] == 1
+    stored = env.db.query(ImportRow).filter_by(id=rows[0]["id"]).one()
+    env.db.refresh(stored)
+    assert stored.payee != "Shop" and (stored.sent_payee, stored.sent_category) == ("Shop", "Groceries")
