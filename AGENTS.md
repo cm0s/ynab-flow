@@ -41,7 +41,7 @@ Local-first app: ingest bank CSVs, sync YNAB history, predict Payee/Category via
 4. ML (`ml_classifier.py`) — TF-IDF + LogReg, models in `backend/models/`
 5. Unclassified fallback
 
-**Thresholds:** History/ML predictions ≥0.95 are eligible for auto-approval; predictions below 0.95 require review. The UI shows medium confidence for 0.75–<0.95 and low confidence below 0.75. Fuzzy history must reach 0.75 to be used before ML. Rules have confidence 1.0 but can explicitly require review or mark a row ignored.
+**Thresholds:** History/ML predictions ≥0.95 are eligible for auto-approval; predictions below 0.95 require review. The UI shows medium confidence for 0.75–<0.95 and low confidence below 0.75. Fuzzy history must reach 0.75 to be used before ML and is capped at 0.94, so it never auto-approves; exact history also stays at 0.94 or below until at least three examples agree (calibrated with `python -m src.evaluation`). Rules have confidence 1.0 but can explicitly require review or mark a row ignored.
 
 **Frontend:** React 19 + TanStack Query. View flow: import → review → push → settings → dashboard (`App.tsx`).
 

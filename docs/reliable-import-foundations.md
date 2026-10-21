@@ -56,9 +56,9 @@ The source category used for rules is `Registered Category`, falling back to `Me
 
 Payee and category each have a confidence and provenance (`rule`, `exact_history`, `fuzzy_history`, `ml`). The row's aggregate `confidence` is the **minimum over the required targets** (a missing target counts as 0; repayments only require a payee). A row is auto-accepted only when both reach 0.95 and no rule requested review. A rule only locks the targets it supplies; an explicit review flag or ignore is never cleared by later evidence.
 
-Exact-history confidence is `winning share × min(1, 0.85 + 0.05 × winning count)`, so a 3:2 category conflict scores 0.60. Same-account, same-sign evidence is preferred; otherwise a capped fallback is used (same sign ≤ 0.90, any sign ≤ 0.70). Fuzzy matches below 0.75 fall through to ML.
+Exact-history confidence is `winning share × min(1, 0.85 + 0.05 × winning count)`, so a 3:2 category conflict scores 0.60. It stays at or below 0.94 (review) until at least three examples agree, and fuzzy matches are capped at 0.94 as well (see the calibration section of `docs/classification-evaluation.md`). Same-account, same-sign evidence is preferred; otherwise a capped fallback is used (same sign ≤ 0.90, any sign ≤ 0.70). Fuzzy matches below 0.75 fall through to ML.
 
-**These scores are operational confidence values, not measured accuracy.** Accuracy has not been evaluated (Phase 2).
+**These scores are operational confidence values, not measured accuracy.** Accuracy is measured with the evaluation command in `docs/classification-evaluation.md`.
 
 ## 4. Identity and reconciliation limits
 

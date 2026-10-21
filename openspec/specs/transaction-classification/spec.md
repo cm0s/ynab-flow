@@ -78,3 +78,18 @@ The system SHALL identify categories by their YNAB category ID in training label
 #### Scenario: Category no longer exists
 - **WHEN** a suggested category ID has been deleted in YNAB
 - **THEN** the row requires review and is not pushed with that category
+
+### Requirement: Keep weak historical evidence below auto-acceptance
+The system SHALL keep fuzzy historical confidence below the auto-acceptance threshold, and SHALL keep exact historical confidence below it until at least three examples agree on the winning value. Such evidence still supplies a suggestion that the user reviews.
+
+#### Scenario: Fuzzy match
+- **WHEN** a payee or category comes from a fuzzy historical match, however similar
+- **THEN** its confidence is at most 0.94 and the row requires review
+
+#### Scenario: Two agreeing exact examples
+- **WHEN** exactly two consistent historical examples match the description
+- **THEN** the suggestion is made with confidence at most 0.94 and the row requires review
+
+#### Scenario: Three agreeing exact examples
+- **WHEN** three consistent same-account historical examples match and no other rule applies
+- **THEN** the target can reach the auto-acceptance threshold
