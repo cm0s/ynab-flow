@@ -209,3 +209,20 @@ def test_contextual_fallback_is_capped_below_auto_acceptance(db):
     assert same.confidence == 1.0 and same.context == "account+sign"
     assert other.context == "sign" and other.confidence <= 0.90
     assert refund.context == "any" and refund.confidence <= 0.70
+
+
+def test_fuzzy_matches_never_reach_auto_acceptance():
+    from src.historical_matcher import FUZZY_CAP, HistoricalMatcher, _CachedTxn, _trigrams
+    matcher = HistoricalMatcher.__new__(HistoricalMatcher)
+    matcher._category_names = {"c": "Groceries"}
+    matcher._cache = [_CachedTxn("MIGROS LAUSANNE GARE", "MIGROS", -50.0, "a", "Migros", "c",
+                                 _trigrams("MIGROS LAUSANNE GARE"))]
+    m = matcher._fuzzy_match("MIGROS LAUSANNE GARE.", "MIGROS", -50.0, "a")
+    assert m is not None and m.confidence == FUZZY_CAP < 0.95
+
+
+def test_fewer_than_three_agreeing_examples_stay_below_auto_acceptance():
+    from src.historical_matcher import _target_confidence
+    assert _target_confidence(["A"]) == ("A", 0.9, False)
+    assert _target_confidence(["A", "A"]) == ("A", 0.94, False)        # was 0.95
+    assert _target_confidence(["A", "A", "A"]) == ("A", 1.0, False)

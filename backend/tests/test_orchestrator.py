@@ -180,7 +180,13 @@ def test_fuzzy_below_threshold_falls_through_to_ml(db):
 
 def test_accepted_rows_meet_both_thresholds(db):
     plan, acct, payee, cat = _world(db)
-    _hist(db, plan, acct, payee, cat, n=2)  # 0.95 each: just meets threshold
+    _hist(db, plan, acct, payee, cat, n=2)  # two agreeing examples: capped just below auto-acceptance
+    db.commit()
+    r2 = Orchestrator(db, plan.id, StubML()).predict("COOP CITY GENEVE", -20.0, account_id=acct.id)
+    assert r2.confidence == pytest.approx(0.94) and r2.review_required
+    db.add(Transaction(plan_id=plan.id, account_id=acct.id, payee_id=payee.id, category_id=cat.id,  # a third example
+                       ynab_transaction_id="h-third", date="2026-01-02", amount=-20000, amount_milliunits=-20000,
+                       memo="COOP CITY GENEVE"))
     db.commit()
     r = Orchestrator(db, plan.id, StubML()).predict("COOP CITY GENEVE", -20.0, account_id=acct.id)
     assert not r.review_required

@@ -16,6 +16,11 @@ from src.normalizer import normalize
 # Contextual fallback evidence is capped below auto-acceptance (0.95).
 SAME_SIGN_FALLBACK_CAP = 0.90
 ANY_SIGN_FALLBACK_CAP = 0.70
+# Calibrated on household history (docs/classification-evaluation.md): fuzzy matches and exact
+# matches backed by fewer than three agreeing examples were wrong too often to skip review.
+BELOW_AUTO_ACCEPT = 0.94
+FUZZY_CAP = BELOW_AUTO_ACCEPT
+MIN_AGREEING_FOR_AUTO = 3
 
 
 @dataclass
@@ -51,7 +56,8 @@ def _sign(amount: float) -> int:
 def _target_confidence(labels: List[str], sort_key=None) -> Tuple[Optional[str], float, bool]:
     """Winning label, share-times-frequency confidence, and whether labels conflict.
 
-    confidence = winning share * min(1, 0.85 + 0.05 * winning_count); ties resolve
+    confidence = winning share * min(1, 0.85 + 0.05 * winning_count), capped below
+    auto-acceptance when fewer than MIN_AGREEING_FOR_AUTO examples agree; ties resolve
     deterministically to the smallest label under ``sort_key`` (default: the label).
     """
     if not labels:
@@ -60,7 +66,10 @@ def _target_confidence(labels: List[str], sort_key=None) -> Tuple[Optional[str],
     top = max(counts.values())
     winner = sorted((label for label, n in counts.items() if n == top), key=sort_key)[0]
     share = top / len(labels)
-    return winner, round(share * min(1.0, 0.85 + 0.05 * top), 4), len(counts) > 1
+    confidence = share * min(1.0, 0.85 + 0.05 * top)
+    if top < MIN_AGREEING_FOR_AUTO:
+        confidence = min(confidence, BELOW_AUTO_ACCEPT)
+    return winner, round(confidence, 4), len(counts) > 1
 
 
 @dataclass
@@ -274,7 +283,8 @@ class HistoricalMatcher:
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best_payee, best_cat = scored[0]
 
-        confidence = round(best_score, 3)
+        # Fuzzy evidence can suggest but never auto-accept on its own
+        confidence = round(min(best_score, FUZZY_CAP), 3)
         return HistoricalMatch(
             payee=best_payee,
             category=self._category_names.get(best_cat) if best_cat else None,

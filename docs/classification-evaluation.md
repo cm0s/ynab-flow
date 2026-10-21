@@ -59,6 +59,22 @@ Each run writes `<timestamp>-<input hash>.json` (machine-readable, comparable be
 - Export descriptions are YNAB memos, which can contain notes instead of bank text.
 - Identical input, cut-off, options and code give identical metrics. The report records the input SHA-256 and the git commit.
 
+## Calibration (October 2026)
+
+The first evaluation showed that rows the app auto-accepted (both targets ≥ 0.95) were right only 88.9% of the time on the export (76.5% on the synced history). Two sources of over-confidence were measured:
+
+- **Fuzzy history** could reach 0.95. Those rows were wrong about 22% of the time.
+- **Exact history backed by only two agreeing examples** scored 0.95.
+
+Fuzzy confidence is now capped at 0.94, and exact history stays at 0.94 or below until at least three examples agree. Both still suggest a payee and category; they just need review. The rule was chosen on the 2024-12-19 → 2026-10 evaluation period and checked on a separate period (training before 2023-01-01, first 2,000 rows after):
+
+| Period | Before: auto-accepted, precision | After: auto-accepted, precision |
+|---|---|---|
+| 2023 validation | 256 rows, 85.9% | 132 rows, 100% |
+| 2024-12 → 2026-10 | 727 rows, 88.9% | 510 rows, 92.3% |
+
+Accuracy itself is unchanged, because predictions are the same and only review eligibility changed. Most remaining auto-accept mistakes are payees or categories renamed after the matching history, which no confidence rule can predict.
+
 # Training, promotion and rollback
 
 ## What the classifier learns from
