@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Start the backend (:8000) and frontend (:5173) together. Stop both with Ctrl+C.
 set -euo pipefail
-set -m   # job control: each server gets its own process group so it can be stopped as a whole
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ ! -d "$ROOT/backend/venv" ]; then
@@ -29,9 +28,10 @@ cleanup() {
 }
 trap cleanup INT TERM EXIT
 
-(cd "$ROOT/backend" && exec ./venv/bin/fastapi dev src/main.py) &
+# setsid: own session (stoppable as a group, never suspended by the terminal); stdin detached
+(cd "$ROOT/backend" && exec setsid ./venv/bin/fastapi dev src/main.py < /dev/null) &
 pids+=($!)
-(cd "$ROOT/frontend" && exec pnpm run dev) &
+(cd "$ROOT/frontend" && exec setsid pnpm run dev < /dev/null) &
 pids+=($!)
 
 echo "Backend:  http://localhost:8000  (docs at /docs)"
