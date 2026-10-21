@@ -128,12 +128,16 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
                 ) : (
                   <RefreshCw size={16} />
                 )}
-                Sync Budgets
+                Refresh budget list
               </button>
             </div>
+            <p style={{ marginTop: 6, fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              Updates the list of budgets and their accounts. The Sync button in the header also does this,
+              then fetches recent changes to transactions.
+            </p>
             {syncMutation.isSuccess && (
               <p style={{ marginTop: 8, color: 'var(--success)', fontSize: '0.85rem' }}>
-                ✓ Budget sync completed
+                ✓ Budget list refreshed
               </p>
             )}
           </div>
@@ -141,11 +145,13 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
           {/* Data Sync — full sync with transactions */}
           <div className="card" style={{ padding: 24 }}>
             <h3 style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Database size={18} color="var(--accent)" /> Historical Data Sync
+              <Database size={18} color="var(--accent)" /> Re-download all history
             </h3>
             <p style={{ marginBottom: 16, fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-              Syncs <strong>categories, payees, and all transactions</strong> from YNAB for the selected plan.
-              This data is used by the historical matcher and ML classifier to auto-classify new imports.
+              For everyday use, the <strong>Sync</strong> button in the header is enough: it only fetches what changed.
+              This downloads <strong>all categories, payees and transactions</strong> of the selected budget again.
+              It is slow, so use it when local data looks wrong or incomplete, or after an update that records new
+              information for every transaction.
             </p>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button
@@ -156,13 +162,13 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
                 {fullSyncMutation.isPending ? (
                   <><Loader2 size={16} className="loading-pulse" /> {syncProgress}</>
                 ) : (
-                  <><Database size={16} /> Full Sync (Categories + Payees + Transactions)</>
+                  <><Database size={16} /> Re-download all history</>
                 )}
               </button>
             </div>
             {fullSyncMutation.isSuccess && (
               <p style={{ marginTop: 8, color: 'var(--success)', fontSize: '0.85rem' }}>
-                ✓ Full sync completed — historical transactions are now available for classification
+                ✓ All history re-downloaded and available for classification
               </p>
             )}
             {fullSyncMutation.isError && (
@@ -179,7 +185,7 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
             </h3>
             <p style={{ marginBottom: 16, fontSize: '0.85rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
               Train the machine learning model from your synced YNAB transaction history.
-              Run this <strong>after a full sync</strong> to enable ML-based auto-classification.
+              Run this <strong>after syncing</strong> to enable ML-based auto-classification.
             </p>
             <button
               className="btn btn-secondary"

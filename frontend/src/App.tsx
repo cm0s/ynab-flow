@@ -425,6 +425,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
             className="btn btn-secondary"
             onClick={() => syncMutation.mutate()}
             disabled={syncMutation.isPending}
+            title="Fetch what changed in YNAB since the last sync: budgets, accounts, categories, payees and transactions"
           >
             {syncMutation.isPending ? (
               <Loader2 size={16} className="loading-pulse" />
