@@ -131,6 +131,14 @@ h3 { font-size: 1.125rem; }
   background: var(--bg-card-hover);
 }
 
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+}
+.btn-danger:hover {
+  filter: brightness(1.1);
+}
+
 .btn-ghost {
   background: transparent;
   color: var(--text-secondary);

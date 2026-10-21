@@ -216,6 +216,10 @@ export function completeBatch(batchId: string) {
   return request<{ status: string }>(`/import-batches/${batchId}/complete`, { method: 'POST' });
 }
 
+export function discardBatch(batchId: string) {
+  return request<{ removed_rows: number; kept_rows: number }>(`/import-batches/${batchId}/discard`, { method: 'POST' });
+}
+
 export interface ReconcileResponse extends ActiveBatchResponse {
   warning: string | null;
   transfer_account_suggestions: string[];

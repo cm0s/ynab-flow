@@ -24,7 +24,7 @@ from src.identity import allocate_occurrences, add_confirmed_occurrence, Identit
 from src.reconciliation import (
     COMPLETED, candidate_transactions, refresh_history, reconcile_rows, suggest_transfer_accounts, transfer_payee_for,
 )
-from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow, SourceRecord
+from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow, SourceRecord, SourceExport
 from src.auth import verify_token, validate_auth_config
 
 validate_auth_config()
@@ -622,6 +622,50 @@ def complete_batch(batch_id: str, db: Session = Depends(get_db), _user: str = De
     batch.status = "completed"
     db.commit()
     return {"status": "completed"}
+
+
+@app.post("/import-batches/{batch_id}/discard")
+def discard_batch(batch_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Remove an active import that has not been pushed.
+
+    Rows already in YNAB (and any record that may have reached YNAB) keep their
+    identity so a re-upload cannot duplicate them; everything else is forgotten.
+    """
+    batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    if batch.status != "active":
+        raise HTTPException(status_code=409, detail="Only the active import can be removed.")
+    unsure = [r for r in batch.rows if r.source_record is not None
+              and r.source_record.write_state in ("claimed", "reconcile_required")]
+    if unsure:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{len(unsure)} row(s) may already be in YNAB. Check them against YNAB before removing this import.",
+        )
+    removable = [r for r in batch.rows if r.write_state not in COMPLETED]
+    keep_rows = [r for r in batch.rows if r.write_state in COMPLETED]
+    record_ids = {r.source_record_id for r in removable if r.source_record_id}
+    removed = len(removable)
+    for r in removable:
+        db.delete(r)
+    db.flush()
+    # Forget identities only this import created and nothing else references
+    in_use = {x[0] for x in db.query(ImportRow.source_record_id).filter(ImportRow.source_record_id.in_(record_ids)).all()} \
+        if record_ids else set()
+    for rec in db.query(SourceRecord).filter(SourceRecord.id.in_(record_ids)).all() if record_ids else []:
+        if rec.id not in in_use and rec.write_state in ("unsent", "error") and not rec.ynab_transaction_id:
+            db.delete(rec)
+    report = json.loads(batch.report_json or "{}")
+    if batch.export_signature and not report.get("repeated_export") and batch.account_id:
+        db.query(SourceExport).filter_by(
+            plan_id=batch.plan_id, account_id=batch.account_id, signature=batch.export_signature).delete()
+    if keep_rows:
+        batch.status = "abandoned"
+    else:
+        db.delete(batch)
+    db.commit()
+    return {"removed_rows": removed, "kept_rows": len(keep_rows)}
 
 
 # ---------------------------------------------------------------------------
