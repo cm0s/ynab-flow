@@ -233,6 +233,18 @@ export const resolveRow = (rowId: string, action: ResolveAction, ynabTransaction
     body: JSON.stringify({ action, ynab_transaction_id: ynabTransactionId }),
   });
 
+export interface LinkCandidate {
+  ynab_transaction_id: string;
+  date: string;
+  amount_milliunits: number;
+  payee: string;
+  category: string;
+  memo: string;
+}
+
+export const getCandidates = (rowId: string) =>
+  request<{ candidates: LinkCandidate[] }>(`/import-rows/${rowId}/candidates`);
+
 export const routeTransfer = (rowId: string, accountId: string | null) =>
   request<ImportRowData & { warning: string | null }>(`/import-rows/${rowId}/transfer`, {
     method: 'POST',

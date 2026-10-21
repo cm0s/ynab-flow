@@ -15,7 +15,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from sqlalchemy.orm import Session
 
 from src.identity import IMPORT_ID_PREFIX
-from src.models import Account, ImportRow, Payee, Plan, SourceRecord, Transaction
+from src.models import Account, Category, ImportRow, Payee, Plan, SourceRecord, Transaction
 from src.normalizer import normalize
 from src.sync_service import SyncService
 
@@ -158,6 +158,33 @@ def reconcile_rows(db: Session, plan: Plan, rows: Iterable[ImportRow], history_f
                 f"{len(candidates)} YNAB transaction(s) share this account, date and amount "
                 f"({len(evidenced)} also match the description); confirm a link or mark this as a new purchase."
             )
+
+
+def candidate_transactions(db: Session, row: ImportRow) -> List[dict]:
+    """Live YNAB transactions a blocked row could be linked to (same account, date and amount)."""
+    rec = row.source_record
+    if rec is None or rec.amount_milliunits is None:
+        return []
+    linked = {
+        r[0] for r in db.query(SourceRecord.ynab_transaction_id)
+        .filter(SourceRecord.plan_id == rec.plan_id, SourceRecord.id != rec.id,
+                SourceRecord.ynab_transaction_id.isnot(None)).all()
+    }
+    found = db.query(Transaction).filter(
+        Transaction.plan_id == rec.plan_id, Transaction.account_id == rec.account_id,
+        Transaction.date == rec.date, Transaction.amount_milliunits == rec.amount_milliunits,
+        Transaction.deleted == False,  # noqa: E712
+    ).all()
+    payees = {p.id: p.name for p in db.query(Payee).filter(Payee.plan_id == rec.plan_id).all()}
+    category_ids = {t.category_id for t in found if t.category_id}
+    categories = {c.id: c.name for c in db.query(Category).filter(Category.id.in_(category_ids)).all()} if category_ids else {}
+    return [
+        {"ynab_transaction_id": t.ynab_transaction_id, "date": t.date,
+         "amount_milliunits": t.amount_milliunits, "payee": payees.get(t.payee_id, ""),
+         "category": categories.get(t.category_id, ""), "memo": t.memo or ""}
+        for t in found
+        if t.ynab_transaction_id not in linked and not (t.import_id or "").startswith(IMPORT_ID_PREFIX)
+    ]
 
 
 # ---------------------------------------------------------------------------

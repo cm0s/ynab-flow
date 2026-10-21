@@ -22,7 +22,7 @@ from src.write_back_service import WriteBackService, RowOverride, recover_stale_
 from src.transfer_detector import detect_transfer
 from src.identity import allocate_occurrences, add_confirmed_occurrence, IdentityCollision, canonical_evidence
 from src.reconciliation import (
-    COMPLETED, refresh_history, reconcile_rows, suggest_transfer_accounts, transfer_payee_for,
+    COMPLETED, candidate_transactions, refresh_history, reconcile_rows, suggest_transfer_accounts, transfer_payee_for,
 )
 from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow, SourceRecord
 from src.auth import verify_token, validate_auth_config
@@ -666,6 +666,13 @@ def reconcile_batch(
     linked = sum(1 for r in batch.rows if r.reconciliation_state == "linked" and r.write_state in COMPLETED)
     return {**_batch_payload(db, batch), "warning": warning, "transfer_account_suggestions": suggestions,
             "linked_count": linked}
+
+
+@app.get("/import-rows/{row_id}/candidates")
+def row_candidates(row_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """YNAB transactions this blocked row could be linked to."""
+    row = _owned_row(db, row_id)
+    return {"candidates": candidate_transactions(db, row)}
 
 
 class RowResolution(BaseModel):

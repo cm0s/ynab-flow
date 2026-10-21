@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { AlertTriangle, RefreshCw, Loader2 } from 'lucide-react';
-import type { Account, ResolveAction } from '../api/client';
+import { getCandidates } from '../api/client';
+import type { Account, ResolveAction, LinkCandidate } from '../api/client';
 import type { ReviewedRow } from './ReviewTable';
 import { needsResolution } from '../lib/importFlow';
 
@@ -29,12 +31,38 @@ const REASON: Record<string, string> = {
   quarantined: 'The stored amount cannot be represented exactly; re-import this file.',
 };
 
+const describe = (c: LinkCandidate) =>
+  [c.payee || 'No payee', c.category, c.memo].filter(Boolean).join(' · ');
+
+/** Pick one of the YNAB transactions that share this row's account, date and amount. */
+function LinkExisting({ rowId, busy, onLink }: { rowId: string; busy: boolean; onLink: (id: string) => void }) {
+  const [choice, setChoice] = useState('');
+  const { data, isLoading } = useQuery({ queryKey: ['row-candidates', rowId], queryFn: () => getCandidates(rowId) });
+  const candidates = data?.candidates ?? [];
+  if (!isLoading && candidates.length === 0) {
+    return <span style={{ color: 'var(--text-muted)' }}>No linkable YNAB transaction found.</span>;
+  }
+  return (
+    <>
+      <div className="select-wrapper">
+        <select aria-label="Existing YNAB transaction" value={choice} disabled={isLoading}
+          onChange={(e) => setChoice(e.target.value)}>
+          <option value="">{isLoading ? 'Loading…' : 'Link to existing…'}</option>
+          {candidates.map((c) => (
+            <option key={c.ynab_transaction_id} value={c.ynab_transaction_id}>{describe(c)}</option>
+          ))}
+        </select>
+      </div>
+      <button className="btn btn-secondary" disabled={busy || !choice} onClick={() => onLink(choice)}>Link existing</button>
+    </>
+  );
+}
+
 /** Rows that cannot be written yet, with the actions that resolve them. Bank values are never editable here. */
 export default function ResolutionPanel({
   rows, accounts, cardAccountId, suggestedAccountIds, busy, warning, onRecheck, onResolve, onRoute,
 }: Props) {
   const [picked, setPicked] = useState<Record<string, string>>({});
-  const [linkIds, setLinkIds] = useState<Record<string, string>>({});
   const blocked = rows.filter(needsResolution);
   if (blocked.length === 0 && !warning) return null;
 
@@ -98,17 +126,7 @@ export default function ResolutionPanel({
               {!isRepayment && (state === 'potential' || state === 'conflict') && (
                 <>
                   <button className="btn btn-primary" disabled={busy} onClick={() => onResolve(r.id, 'confirm_new')}>New purchase</button>
-                  <input
-                    placeholder="YNAB transaction id"
-                    value={linkIds[r.id] ?? ''}
-                    onChange={(e) => setLinkIds({ ...linkIds, [r.id]: e.target.value })}
-                    style={{ width: 200 }}
-                  />
-                  <button
-                    className="btn btn-secondary"
-                    disabled={busy || !linkIds[r.id]}
-                    onClick={() => onResolve(r.id, 'link_existing', linkIds[r.id])}
-                  >Link existing</button>
+                  <LinkExisting rowId={r.id} busy={busy} onLink={(id) => onResolve(r.id, 'link_existing', id)} />
                 </>
               )}
               {!isRepayment && state === 'deleted_link' && (
