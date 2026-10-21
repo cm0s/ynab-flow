@@ -180,6 +180,9 @@ class ImportRow(Base):
     write_state = Column(String, nullable=False, default="unsent")  # unsent | created | existing | error | unresolved
     write_error = Column(String, nullable=False, default="")
     ynab_transaction_id = Column(String, nullable=True)
+    # Payee/category actually sent to YNAB, kept for audit even if they differ from the stored suggestion or edits
+    sent_payee = Column(String, nullable=True)
+    sent_category = Column(String, nullable=True)
 
     batch = relationship("ImportBatch", back_populates="rows")
     source_record = relationship("SourceRecord")

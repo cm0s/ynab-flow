@@ -157,6 +157,7 @@ class WriteBackService:
                 wr.status = "unresolved"
                 wr.error = "A write for this source row is already in progress or needs reconciliation."
                 continue
+            row.sent_payee, row.sent_category = (ov.payee_name or None), (ov.category_name or None)
             payloads.append((wr, row, self._build_payload(plan, row, ov)))
         self._persist_blocked(sendable)
         self.db.commit()
