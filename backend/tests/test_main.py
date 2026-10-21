@@ -196,7 +196,7 @@ def test_training_rejects_concurrent_requests(test_client, plan):
 
 def test_training_reports_insufficient_data(test_client, plan, monkeypatch):
     from src.main import MLClassifier, training_lock
-    monkeypatch.setattr(MLClassifier, 'train', lambda *args: {
+    monkeypatch.setattr(MLClassifier, 'train', lambda *args, **kwargs: {
         'payee_trained': False, 'category_trained': False, 'training_rows': 0,
     })
     response = test_client.post(f'/train?plan_id={plan.id}')

@@ -26,6 +26,8 @@ from src.reconciliation import (
 )
 from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow, SourceRecord, SourceExport
 from src.auth import verify_token, validate_auth_config
+from src.categories import CategoryDirectory
+from src import model_registry
 
 validate_auth_config()
 
@@ -56,20 +58,15 @@ def recover_interrupted_writes():
 
 
 @app.on_event("startup")
-def auto_train_models():
-    """Train ML models on startup if they don't exist and data is available."""
-    from src.ml_classifier import PAYEE_MODEL_PATH, CATEGORY_MODEL_PATH
-    if PAYEE_MODEL_PATH.exists() and CATEGORY_MODEL_PATH.exists():
-        return
+def ensure_models():
+    """Register legacy model files, rebuild a missing active version, or train a first model."""
     from src.database import SessionLocal
     db = SessionLocal()
     try:
         plan = db.query(Plan).first()
-        if plan:
-            classifier = MLClassifier()
-            classifier.train(db, plan.id)
+        model_registry.ensure_active_model(db, plan.id if plan else None)
     except Exception as e:
-        print(f"Auto-train skipped: {e}")
+        print(f"Model startup check skipped: {e}")
     finally:
         db.close()
 
@@ -318,15 +315,35 @@ def train_models(plan_id: str, db: Session = Depends(get_db), _user: str = Depen
     if not training_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="Model training is already running. Please wait before retrying.")
     try:
-        classifier = MLClassifier()
-        stats = classifier.train(db, plan_id)
-        if not stats["payee_trained"] and not stats["category_trained"]:
+        result = model_registry.train_candidate(db, plan_id)
+        if result["version"] is None:
             raise HTTPException(status_code=422, detail="Not enough labeled history to train. Sync transactions with at least two different payees or categories.")
-        return {"status": "success", **stats}
+        return {"status": "promoted" if result["promoted"] else "not_promoted", **result}
     except ValueError as error:
         raise HTTPException(status_code=422, detail="Training could not use the available transaction memos. Check that your synced history contains meaningful text.") from error
     finally:
         training_lock.release()
+
+@app.get("/models")
+def get_models(db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Model versions, newest first, with training counts and held-out comparisons."""
+    return {"versions": model_registry.list_versions(db)}
+
+
+@app.post("/models/{version_id}/activate")
+def activate_model(version_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Restore a retired model version (rollback)."""
+    if not training_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="Model training is running. Try again when it finishes.")
+    try:
+        return model_registry.restore(db, version_id)
+    except LookupError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    finally:
+        training_lock.release()
+
 
 # ---------------------------------------------------------------------------
 # Phase 5 endpoints — import batches
@@ -336,7 +353,7 @@ REVIEW_STATUSES = ("pending", "accepted", "ignored")
 PREDICTION_FIELDS = (
     "payee", "category", "confidence", "source", "explanation", "review_required", "flag_ignore",
     "cleaned_memo", "merchant_stem", "payee_confidence", "category_confidence", "payee_source",
-    "category_source", "payee_explanation", "category_explanation", "review_flag",
+    "category_source", "payee_explanation", "category_explanation", "review_flag", "category_id",
 )
 
 
@@ -363,6 +380,7 @@ def _batch_rows_to_dicts(rows: list) -> list:
             "import_id": r.source_record.import_id if r.source_record else None,
             "payee": r.payee,
             "category": r.category,
+            "category_id": r.category_id,
             "confidence": r.confidence,
             "payee_confidence": r.payee_confidence,
             "category_confidence": r.category_confidence,
@@ -385,6 +403,7 @@ def _batch_rows_to_dicts(rows: list) -> list:
             "status": r.status,
             "edited_payee": r.edited_payee,
             "edited_category": r.edited_category,
+            "edited_category_id": r.edited_category_id,
             "edited_memo": r.edited_memo,
             "flag_color": r.flag_color,
         }
@@ -436,10 +455,15 @@ def _apply_predictions(rows: List[ImportRow], results, keep_transfer: bool = Tru
             import_row.edited_payee = d["payee"] or ""
         if not user_edited_category:
             import_row.edited_category = d["category"] or ""
+            import_row.edited_category_id = d["category_id"]
         if import_row.status != "ignored":
             auto = not d["review_required"] and not d["flag_ignore"] and import_row.transfer_state == "none"
             if not user_edited_payee and not user_edited_category:
                 import_row.status = "accepted" if auto else "pending"
+
+
+def _directory_for_row(db: Session, row: ImportRow) -> CategoryDirectory:
+    return CategoryDirectory(db, row.batch.plan_id)
 
 
 def _account_for_batch(db: Session, batch: ImportBatch):
@@ -509,7 +533,7 @@ async def upload_csv(
             **{name: d[name] for name in PREDICTION_FIELDS if name not in ("cleaned_memo", "merchant_stem")},
             cleaned_memo=d["cleaned_memo"], merchant_stem=d["merchant_stem"],
             status="accepted" if auto_approved else "pending",
-            edited_payee=d["payee"] or "", edited_category=d["category"] or "",
+            edited_payee=d["payee"] or "", edited_category=d["category"] or "", edited_category_id=d["category_id"],
             account_id=account.id, amount_milliunits=txn.amount_milliunits, currency=txn.currency,
             source_format=txn.source_format, source_status=txn.source_status,
             evidence_json=json.dumps(txn.evidence, ensure_ascii=False), source_record_id=alloc.record.id,
@@ -571,6 +595,7 @@ class ImportRowUpdate(BaseModel):
     status: Optional[str] = None
     edited_payee: Optional[str] = None
     edited_category: Optional[str] = None
+    edited_category_id: Optional[str] = None   # local category id; preferred over the name
     edited_memo: Optional[str] = None
     flag_color: Optional[str] = None
 
@@ -591,8 +616,13 @@ def update_import_rows(req: ImportRowsUpdateRequest, db: Session = Depends(get_d
             row.status = u.status
         if u.edited_payee is not None:
             row.edited_payee = u.edited_payee
-        if u.edited_category is not None:
-            row.edited_category = u.edited_category
+        if u.edited_category_id is not None or u.edited_category is not None:
+            directory = _directory_for_row(db, row)
+            category_id = u.edited_category_id or directory.resolve_name(u.edited_category)
+            if u.edited_category_id and u.edited_category_id not in directory:
+                raise HTTPException(status_code=422, detail="Unknown category for this plan.")
+            row.edited_category_id = category_id or None
+            row.edited_category = directory.name(category_id) if category_id else (u.edited_category or "")
         if u.edited_memo is not None:
             row.edited_memo = u.edited_memo
         if u.flag_color is not None:
@@ -927,6 +957,7 @@ class WriteBackRowItem(BaseModel):
     row_id: str
     payee_name: str = ""
     category_name: str = ""
+    category_id: Optional[str] = None   # local category id; preferred over category_name
     memo: str = ""
     flag_color: Optional[str] = None
     cleared: str = "uncleared"
@@ -974,7 +1005,7 @@ def write_back(
             )
         rows.append(row)
         overrides[row.id] = RowOverride(
-            payee_name=item.payee_name, category_name=item.category_name, memo=item.memo,
+            payee_name=item.payee_name, category_name=item.category_name, category_id=item.category_id, memo=item.memo,
             flag_color=item.flag_color, cleared=item.cleared,
         )
 

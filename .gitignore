@@ -10,3 +10,6 @@
 # Environments
 .env
 STATUS.md
+
+# Local evaluation reports (may contain private transaction data)
+backend/reports/

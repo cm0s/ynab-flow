@@ -56,6 +56,7 @@ def test_account_scoped_rule_applies_at_upload_and_reclassify(env):
     assert up["rows"][0]["payee"] == "Rule Payee" and up["rows"][0]["payee_source"] == "rule"
     re = env.client.post("/reclassify", json={"plan_id": "plan-1", "batch_id": up["batch_id"]}).json()
     assert re["rows"][0]["payee"] == "Rule Payee"
+    assert up["rows"][0]["category_id"] == re["rows"][0]["category_id"] == re["rows"][0]["edited_category_id"] == "c1"
     # the same row on the Post account does not match the card-only rule
     other = env.upload(build([row(desc="Shop One")]), account_id=env.post.id).json()
     assert other["rows"][0]["payee"] != "Rule Payee"

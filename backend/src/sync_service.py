@@ -1,7 +1,8 @@
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from sqlalchemy.orm import Session
 from src.ynab_client import YnabClient
-from src.models import Plan, Account, CategoryGroup, Category, Payee, Transaction
+from src.identity import IMPORT_ID_PREFIX
+from src.models import Plan, Account, CategoryGroup, Category, Payee, Transaction, ImportRow, SourceRecord
 
 
 def _int_milliunits(value):
@@ -13,6 +14,38 @@ def _int_milliunits(value):
     if isinstance(value, float) and value.is_integer():
         return int(value)
     return None
+
+def _sent_values(db: Session, plan_id: str) -> Dict[str, Tuple[Optional[str], Optional[str], Optional[str]]]:
+    """import_id -> (sent payee, sent category id, sent category name) for rows this app pushed."""
+    rows = (
+        db.query(SourceRecord.import_id, ImportRow.sent_payee, ImportRow.sent_category_id, ImportRow.sent_category)
+        .join(ImportRow, ImportRow.source_record_id == SourceRecord.id)
+        .filter(SourceRecord.plan_id == plan_id,
+                (ImportRow.sent_payee.isnot(None)) | (ImportRow.sent_category.isnot(None)))
+        .all()
+    )
+    return {import_id: (payee, category_id, category) for import_id, payee, category_id, category in rows}
+
+
+def derive_provenance(txn: Transaction, sent, payee_names: Dict[str, str], category_names: Dict[str, str]) -> str:
+    """What a synced transaction can teach the classifier (see model-training-lifecycle spec)."""
+    if txn.is_split:
+        return "split_parent"
+    if not (txn.import_id or "").startswith(IMPORT_ID_PREFIX):
+        return "external"
+    if not txn.approved:
+        return "app_unreviewed"
+    if sent:
+        sent_payee, sent_category_id, sent_category = sent
+        payee_changed = bool(sent_payee) and payee_names.get(txn.payee_id) != sent_payee
+        if sent_category_id:
+            category_changed = txn.category_id != sent_category_id
+        else:
+            category_changed = bool(sent_category) and category_names.get(txn.category_id) != sent_category
+        if payee_changed or category_changed:
+            return "app_corrected"
+    return "app_confirmed"
+
 
 class SyncService:
     def __init__(self, db: Session, ynab_client: YnabClient):
@@ -143,9 +176,14 @@ class SyncService:
 
         # Cache references to avoid remote database round trips for every row.
         accounts = {a.ynab_account_id: a.id for a in self.db.query(Account).filter(Account.plan_id == plan.id).all()}
-        payees = {p.ynab_payee_id: p.id for p in self.db.query(Payee).filter(Payee.plan_id == plan.id).all()}
-        categories = {c.ynab_category_id: c.id for c in self.db.query(Category).join(CategoryGroup).filter(CategoryGroup.plan_id == plan.id).all()}
+        payee_rows = self.db.query(Payee).filter(Payee.plan_id == plan.id).all()
+        category_rows = self.db.query(Category).join(CategoryGroup).filter(CategoryGroup.plan_id == plan.id).all()
+        payees = {p.ynab_payee_id: p.id for p in payee_rows}
+        categories = {c.ynab_category_id: c.id for c in category_rows}
+        payee_names = {p.id: p.name for p in payee_rows}
+        category_names = {c.id: c.name for c in category_rows}
         transactions = {t.ynab_transaction_id: t for t in self.db.query(Transaction).filter(Transaction.plan_id == plan.id).all()}
+        sent = _sent_values(self.db, plan.id)
 
         for txn_data in data.get("transactions", []):
              ynab_txn_id = txn_data.get("id")
@@ -191,6 +229,8 @@ class SyncService:
                   txn.cleared = txn_data.get("cleared")
                   txn.approved = txn_data.get("approved", False)
                   txn.deleted = txn_data.get("deleted", False)
+             txn.is_split = bool(txn_data.get("subtransactions"))
+             txn.provenance = derive_provenance(txn, sent.get(txn.import_id or ""), payee_names, category_names)
                   
         new_knowledge = data.get("server_knowledge")
         if new_knowledge:

@@ -1,8 +1,8 @@
 import { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Settings as SettingsIcon, Key, Gauge, Shield, RefreshCw, Loader2, Brain, Database } from 'lucide-react';
-import { syncBudgets, syncPlanData, trainModels, fetchCategories, fetchPayees } from '../api/client';
-import type { CategoryGroup, PayeeItem } from '../api/client';
+import { syncBudgets, syncPlanData, trainModels, fetchCategories, fetchPayees, fetchModels, activateModel } from '../api/client';
+import type { CategoryGroup, PayeeItem, ModelVersionInfo, TargetScore } from '../api/client';
 import RulesManager from './RulesManager';
 
 interface Props {
@@ -48,9 +48,24 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
     },
   });
 
+  const modelsQuery = useQuery({ queryKey: ['models'], queryFn: fetchModels });
+
   const trainMutation = useMutation({
     mutationFn: () => trainModels(planId),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['models'] }),
   });
+
+  const restoreMutation = useMutation({
+    mutationFn: (versionId: string) => activateModel(versionId),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['models'] }),
+  });
+
+  const versions = modelsQuery.data?.versions ?? [];
+  const activeModel = versions.find((v) => v.status === 'active');
+  const lastTraining = versions.find((v) => v.status !== 'retired');
+  const previousModel = versions
+    .filter((v) => v.status === 'retired' && v.files_present)
+    .sort((a, b) => (b.activated_at ?? '').localeCompare(a.activated_at ?? ''))[0];
 
   const inputStyle: React.CSSProperties = {
     width: '100%', padding: '10px 14px', background: 'var(--bg-card)',
@@ -178,10 +193,18 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
               )}
             </button>
             {trainMutation.isSuccess && (
-              <p style={{ marginTop: 8, color: 'var(--success)', fontSize: '0.85rem' }}>
-                ✓ ML model trained successfully
+              <p style={{ marginTop: 8, color: trainMutation.data.promoted ? 'var(--success)' : 'var(--warning)', fontSize: '0.85rem' }}>
+                {trainMutation.data.promoted ? '✓ ' : ''}{trainMutation.data.note}
               </p>
             )}
+            <ModelStatus
+              active={activeModel}
+              last={lastTraining}
+              previous={previousModel}
+              restoring={restoreMutation.isPending}
+              onRestore={(id) => restoreMutation.mutate(id)}
+              error={restoreMutation.isError ? (restoreMutation.error as Error).message : null}
+            />
             {trainMutation.isError && (
               <p style={{ marginTop: 8, color: 'var(--danger)', fontSize: '0.85rem' }}>
                 Error: {(trainMutation.error as Error).message}
@@ -243,6 +266,56 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
       {tab === 'rules' && (
         <RulesManager planId={planId} categoryGroups={categoryGroups} payees={payees} onRuleChanged={onRuleChanged} />
       )}
+    </div>
+  );
+}
+
+const pct = (s?: TargetScore | null) => (s ? `${(s.accuracy * 100).toFixed(1)}%` : '—');
+const day = (iso?: string | null) => (iso ? iso.slice(0, 10) : '—');
+
+/** Active model version, the last training comparison and a restore action. */
+function ModelStatus({ active, last, previous, restoring, onRestore, error }: {
+  active?: ModelVersionInfo;
+  last?: ModelVersionInfo;
+  previous?: ModelVersionInfo;
+  restoring: boolean;
+  onRestore: (id: string) => void;
+  error: string | null;
+}) {
+  const muted: React.CSSProperties = { color: 'var(--text-muted)', fontSize: '0.8rem' };
+  const cmp = last?.comparison;
+  return (
+    <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid var(--border)', fontSize: '0.85rem' }}>
+      <div style={{ marginBottom: 8 }}>
+        <strong>Active model:</strong>{' '}
+        {active ? <>{active.id} <span style={muted}>· since {day(active.activated_at)}
+          {active.training.training_rows != null && ` · ${active.training.training_rows} examples`}</span></> : 'none'}
+      </div>
+      {last && cmp?.candidate && (
+        <div style={{ marginBottom: 8 }}>
+          <strong>Last training</strong> <span style={muted}>({day(last.created_at)}, {last.status},
+            held out {cmp.holdout_examples ?? 0} recent examples)</span>
+          <table style={{ marginTop: 6, fontSize: '0.8rem' }}>
+            <thead><tr><th style={{ textAlign: 'left', paddingRight: 16 }}></th><th style={{ paddingRight: 16 }}>New</th><th>Previous</th></tr></thead>
+            <tbody>
+              {(['payee', 'category'] as const).map((t) => (
+                <tr key={t}>
+                  <td style={{ paddingRight: 16 }}>{t}</td>
+                  <td style={{ paddingRight: 16 }}>{pct(cmp.candidate?.[t])}</td>
+                  <td>{pct(cmp.active?.[t])}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p style={{ ...muted, marginTop: 6 }}>{last.note}</p>
+        </div>
+      )}
+      {previous && (
+        <button className="btn btn-ghost" disabled={restoring} onClick={() => onRestore(previous.id)}>
+          {restoring ? <Loader2 size={14} className="loading-pulse" /> : <RefreshCw size={14} />} Restore previous ({previous.id})
+        </button>
+      )}
+      {error && <p style={{ color: 'var(--danger)', marginTop: 6 }}>{error}</p>}
     </div>
   );
 }

@@ -73,3 +73,32 @@ def test_downgrade_returns_to_prior_schema(tmp_path, monkeypatch):
     insp = sa.inspect(sa.create_engine(url))
     assert "source_records" not in insp.get_table_names()
     assert "amount_milliunits" not in {c["name"] for c in insp.get_columns("import_rows")}
+
+
+def test_category_ids_and_provenance_backfill(tmp_path, monkeypatch):
+    url = f"sqlite:///{tmp_path / 'ids.db'}"
+    cfg = _config(url, monkeypatch)
+    command.upgrade(cfg, "a1b2c3d4e5f6")
+    engine = sa.create_engine(url)
+    with engine.begin() as c:
+        c.execute(sa.text("INSERT INTO plans (id, ynab_plan_id, name) VALUES ('p','yp','P')"))
+        c.execute(sa.text("INSERT INTO accounts (id, plan_id, ynab_account_id, name, type) VALUES ('a','p','ya','A','checking')"))
+        c.execute(sa.text("INSERT INTO category_groups (id, plan_id, ynab_category_group_id, name) VALUES ('g','p','yg','G'), ('h','p','yh','H')"))
+        c.execute(sa.text("INSERT INTO categories (id, category_group_id, ynab_category_id, name, deleted) VALUES "
+                          "('c1','g','yc1','Groceries',0), ('c2','g','yc2','Dup',0), ('c3','h','yc3','Dup',0), ('c4','g','yc4','Gone',1)"))
+        for tid, imp, approved in [("t1", "YF1:abc:1", 0), ("t2", "YF1:def:1", 1), ("t3", None, 1)]:
+            c.execute(sa.text("INSERT INTO transactions (id, plan_id, account_id, ynab_transaction_id, date, amount, cleared, approved, import_id)"
+                              " VALUES (:i,'p','a',:i,'2026-01-01',-1000,'cleared',:ap,:imp)"), {"i": tid, "ap": approved, "imp": imp})
+        c.execute(sa.text("INSERT INTO import_batches (id, plan_id, status) VALUES ('b','p','active')"))
+        for rid, cat in [("r1", "Groceries"), ("r2", "Dup"), ("r3", "Gone"), ("r4", "")]:
+            c.execute(sa.text("INSERT INTO import_rows (id, batch_id, row_index, date, original_memo, amount, category, edited_category)"
+                              " VALUES (:i,'b',0,'2026-01-01','m',-1.0,:c,:c)"), {"i": rid, "c": cat})
+    command.upgrade(cfg, "head")
+    with engine.connect() as c:
+        prov = dict(c.execute(sa.text("SELECT id, provenance FROM transactions")).fetchall())
+        assert prov == {"t1": "app_unreviewed", "t2": "app_confirmed", "t3": "external"}
+        ids = {r.id: (r.category_id, r.edited_category_id) for r in c.execute(sa.text("SELECT id, category_id, edited_category_id FROM import_rows"))}
+        assert ids == {"r1": ("c1", "c1"), "r2": (None, None), "r3": (None, None), "r4": (None, None)}
+        assert "model_versions" in sa.inspect(engine).get_table_names()
+    command.downgrade(cfg, "a1b2c3d4e5f6")
+    assert "model_versions" not in sa.inspect(sa.create_engine(url)).get_table_names()

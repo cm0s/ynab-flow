@@ -11,7 +11,7 @@ export function CategoryPicker({
 }: {
   value: string;
   groups: CategoryGroup[];
-  onChange: (name: string) => void;
+  onChange: (name: string, id?: string) => void;
   inputStyle?: React.CSSProperties;
 }) {
   const [query, setQuery] = useState('');
@@ -91,7 +91,7 @@ export function CategoryPicker({
               {g.categories.map((c) => (
                 <div
                   key={c.id}
-                  onMouseDown={(e) => { e.preventDefault(); onChange(c.name); setOpen(false); setQuery(''); }}
+                  onMouseDown={(e) => { e.preventDefault(); onChange(c.name, c.id); setOpen(false); setQuery(''); }}
                   style={{
                     padding: '6px 12px 6px 20px', fontSize: '0.8rem', cursor: 'pointer',
                     color: c.name === value ? 'var(--accent)' : 'var(--text-primary)',

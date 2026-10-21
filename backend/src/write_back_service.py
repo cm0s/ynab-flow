@@ -27,6 +27,7 @@ from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from src.models import Account, Category, CategoryGroup, ImportRow, Payee, Plan, SourceRecord
+from src.categories import CategoryDirectory
 from src.money import milliunits_to_units
 from src.reconciliation import (
     COMPLETED, block_reason, reconcile_rows, refresh_history, transfer_payee_for,
@@ -44,6 +45,7 @@ class RowOverride:
     """The only values a caller may supply for a persisted row."""
     payee_name: str = ""
     category_name: str = ""
+    category_id: Optional[str] = None   # local category id; preferred over category_name
     memo: str = ""
     flag_color: Optional[str] = None
     cleared: str = "uncleared"
@@ -158,6 +160,7 @@ class WriteBackService:
                 wr.error = "A write for this source row is already in progress or needs reconciliation."
                 continue
             row.sent_payee, row.sent_category = (ov.payee_name or None), (ov.category_name or None)
+            row.sent_category_id = self._category_id(plan, row, ov)
             payloads.append((wr, row, self._build_payload(plan, row, ov)))
         self._persist_blocked(sendable)
         self.db.commit()
@@ -209,6 +212,11 @@ class WriteBackService:
             source = self.db.get(Account, row.transfer_account_id) if row.transfer_account_id else None
             if source is None or transfer_payee_for(self.db, plan.id, source) is None:
                 return self._fail(wr, "Repayment has no valid transfer account.", dry)
+            return
+        category_id = self._category_id(plan, row, ov)
+        if category_id and self._categories(plan).is_deleted(category_id):
+            return self._fail(wr, f"Category '{self._categories(plan).name(category_id)}' was deleted in YNAB; "
+                                  "choose another category.", dry)
 
     # ------------------------------------------------------------------
     # Claims and payloads
@@ -250,8 +258,30 @@ class WriteBackService:
         else:
             payload["payee_name"] = ov.payee_name
         # Explicit null stops YNAB auto-assigning a category from payee history
-        payload["category_id"] = self._resolve_category_id(plan.id, ov.category_name)
+        category_id = self._category_id(plan, row, ov)
+        if category_id:
+            payload["category_id"] = self._categories(plan).ynab_id(category_id)
+        else:
+            payload["category_id"] = self._resolve_category_id(plan.id, ov.category_name)  # legacy rows
         return payload
+
+    def _categories(self, plan: Plan) -> CategoryDirectory:
+        if getattr(self, "_directory_plan", None) != plan.id:
+            self._directory, self._directory_plan = CategoryDirectory(self.db, plan.id), plan.id
+        return self._directory
+
+    def _category_id(self, plan: Plan, row: ImportRow, ov: RowOverride) -> Optional[str]:
+        """The stored category id matching what is being sent; names resolve only for legacy rows."""
+        if ov.category_id:
+            return ov.category_id if ov.category_id in self._categories(plan) else None
+        name = ov.category_name or ""
+        if not name:
+            return None
+        if row.edited_category_id and name == (row.edited_category or ""):
+            return row.edited_category_id
+        if row.category_id and name == (row.category or ""):
+            return row.category_id
+        return None
 
     # ------------------------------------------------------------------
     # Sending and outcome correlation

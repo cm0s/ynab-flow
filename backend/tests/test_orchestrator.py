@@ -189,3 +189,61 @@ def test_accepted_rows_meet_both_thresholds(db):
     db.commit()
     r1 = Orchestrator(db, plan.id, StubML()).predict("ONCE ONLY", -20.0, account_id=acct.id)
     assert r1.confidence == pytest.approx(0.9) and r1.review_required
+
+
+def _seed_category_history(db, n=3):
+    plan = Plan(ynab_plan_id="ids", name="Ids")
+    db.add(plan)
+    db.flush()
+    acc = Account(plan_id=plan.id, ynab_account_id="ya", name="Post", type="checking")
+    group = CategoryGroup(plan_id=plan.id, ynab_category_group_id="yg", name="Everyday")
+    payee = Payee(plan_id=plan.id, ynab_payee_id="yp", name="Migros")
+    db.add_all([acc, group, payee])
+    db.flush()
+    cat = Category(category_group_id=group.id, ynab_category_id="yc", name="Groceries")
+    other = Category(category_group_id=group.id, ynab_category_id="yo", name="Transport")
+    db.add_all([cat, other])
+    db.flush()
+    for i in range(n):
+        db.add(Transaction(plan_id=plan.id, account_id=acc.id, payee_id=payee.id, category_id=cat.id,
+                           ynab_transaction_id=f"t{i}", date="2026-01-0" + str(i + 1), amount=-45000,
+                           amount_milliunits=-45000, memo="MIGROS LAUSANNE"))
+    for i in range(n):
+        db.add(Transaction(plan_id=plan.id, account_id=acc.id, payee_id=payee.id, category_id=other.id,
+                           ynab_transaction_id=f"o{i}", date="2026-01-1" + str(i), amount=-3800,
+                           amount_milliunits=-3800, memo="SBB MOBILE TICKET"))
+    db.commit()
+    return plan, acc, cat
+
+
+def test_renamed_category_keeps_history_and_model_predictions(db, tmp_path):
+    from src.ml_classifier import MLClassifier
+    plan, acc, cat = _seed_category_history(db)
+    ml = MLClassifier(model_dir=tmp_path)
+    ml.train(db, plan.id)
+    cat.name = "Food & groceries"                       # renamed in YNAB, then synced
+    db.commit()
+    orch = Orchestrator(db, plan.id, ml_classifier=ml)
+    hist = orch.predict("MIGROS LAUSANNE", amount=-45.0, account_id=acc.id)
+    assert (hist.category_id, hist.category, hist.category_source) == (cat.id, "Food & groceries", "exact_history")
+    # the model was trained before the rename and still predicts the same category id
+    assert ml.predict("MIGROS LAUSANNE").category == cat.id
+    model_only = Orchestrator(db, plan.id, ml_classifier=ml)
+    model_only.history._exact_index.clear()
+    model_only.history._cache.clear()
+    via_ml = model_only.predict("MIGROS LAUSANN", amount=-45.0, account_id=acc.id)
+    assert via_ml.category_source == "ml" and via_ml.category_id == cat.id and via_ml.category == "Food & groceries"
+
+
+def test_rule_category_name_resolves_to_id_and_deleted_category_is_not_suggested(db, monkeypatch):
+    from src.ml_classifier import MLClassifier, MLPrediction
+    plan, acc, cat = _seed_category_history(db)
+    db.add(Rule(plan_id=plan.id, name="r", priority=1, match_type="contains", pattern="COOP", assign_category="Groceries"))
+    db.commit()
+    monkeypatch.setattr(MLClassifier, "predict", lambda self, memo: MLPrediction())
+    ruled = Orchestrator(db, plan.id).predict("COOP PRONTO", amount=-5.0)
+    assert (ruled.category, ruled.category_id) == ("Groceries", cat.id)
+    cat.deleted = True
+    db.commit()
+    gone = Orchestrator(db, plan.id).predict("MIGROS LAUSANNE", amount=-45.0, account_id=acc.id)
+    assert gone.category is None and gone.category_id is None and gone.review_required

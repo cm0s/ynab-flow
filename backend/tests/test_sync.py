@@ -183,7 +183,7 @@ def test_transaction_sync_uses_constant_lookups_and_upserts(service, db):
     event.listen(engine, "before_cursor_execute", record_select)
     try:
         service.sync_transactions(plan)
-        assert len(selects) <= 6
+        assert len(selects) <= 7   # constant lookups incl. the sent-values map for provenance
     finally:
         event.remove(engine, "before_cursor_execute", record_select)
     assert db.query(Transaction).count() == 100
@@ -218,3 +218,42 @@ def test_sync_stores_integer_milliunits_import_id_and_transfer_linkage(service, 
     t = db.query(Transaction).one()
     assert t.amount_milliunits == -50000 and isinstance(t.amount_milliunits, int)
     assert (t.import_id, t.transfer_account_ynab_id, t.transfer_transaction_ynab_id) == ("YF1:abc:1", "acc-2", "t0")
+
+
+@respx.mock
+def test_sync_derives_provenance_and_split_parents(service, db):
+    from src.models import ImportBatch, ImportRow, SourceRecord
+    plan = Plan(id="p", ynab_plan_id="budget-1", name="B")
+    db.add(plan)
+    db.flush()
+    db.add(Account(id="a", plan_id="p", ynab_account_id="acc-1", name="A", type="checking"))
+    db.add(CategoryGroup(id="g", plan_id="p", ynab_category_group_id="yg", name="G"))
+    db.add(Payee(id="py", plan_id="p", ynab_payee_id="y-shop", name="Shop"))
+    db.flush()
+    db.add_all([Category(id="c1", category_group_id="g", ynab_category_id="y-c1", name="Groceries"),
+                Category(id="c2", category_group_id="g", ynab_category_id="y-c2", name="Transport")])
+    db.add(ImportBatch(id="b", plan_id="p", status="completed"))
+    for imp in ("YF1:conf:1", "YF1:corr:1", "YF1:unrev:1"):
+        rec = SourceRecord(id=imp, plan_id="p", account_id="a", fingerprint=imp, occurrence=1, date="2026-10-01",
+                           amount_milliunits=-1000, import_id=imp, write_state="created")
+        db.add(rec)
+        db.add(ImportRow(batch_id="b", row_index=0, date="2026-10-01", original_memo="m", amount=-1.0,
+                         source_record_id=rec.id, sent_payee="Shop", sent_category="Groceries", sent_category_id="c1"))
+    db.commit()
+
+    def t(tid, imp, approved, category="y-c1", subs=None):
+        return {"id": tid, "account_id": "acc-1", "payee_id": "y-shop", "category_id": category, "date": "2026-10-01",
+                "amount": -1000, "memo": "m", "cleared": "cleared", "approved": approved, "deleted": False,
+                "import_id": imp, "subtransactions": subs or []}
+    respx.get("https://api.ynab.com/v1/budgets/budget-1/transactions").mock(return_value=Response(200, json={"data": {
+        "transactions": [
+            t("unrev", "YF1:unrev:1", False),
+            t("conf", "YF1:conf:1", True),
+            t("corr", "YF1:corr:1", True, category="y-c2"),          # user changed the category in YNAB
+            t("ext", None, True),
+            t("split", None, True, category=None, subs=[{"id": "s1", "amount": -500}]),
+        ], "server_knowledge": 6}}))
+    service.sync_transactions(plan)
+    got = {x.ynab_transaction_id: (x.provenance, x.is_split) for x in db.query(Transaction).all()}
+    assert got == {"unrev": ("app_unreviewed", False), "conf": ("app_confirmed", False),
+                   "corr": ("app_corrected", False), "ext": ("external", False), "split": ("split_parent", True)}
