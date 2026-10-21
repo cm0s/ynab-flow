@@ -124,3 +124,41 @@ def test_pending_evidence_survives_a_later_posted_export_without_creating_record
     stored = json.loads(old.report_json)["pending_rows"][0]
     assert stored == pending and stored["amount_milliunits"] == later["rows"][0]["amount_milliunits"]
     assert env.db.query(SourceRecord).count() == 1 and env.post_bodies == []
+
+
+def test_discard_removes_unpushed_import_and_allows_a_clean_reupload(env):
+    from src.models import SourceRecord, SourceExport
+    first = env.upload(build([row(desc="Coffee", merchant="Cafe", amount="4.50")])).json()
+    assert env.db.query(SourceRecord).count() == 1
+    r = env.client.post(f"/import-batches/{first['batch_id']}/discard")
+    assert r.status_code == 200 and r.json() == {"removed_rows": 1, "kept_rows": 0}
+    env.db.expire_all()
+    assert env.db.query(ImportRow).count() == 0 and env.db.query(SourceRecord).count() == 0
+    assert env.db.query(SourceExport).count() == 0 and env.db.query(ImportBatch).count() == 0
+    assert env.client.get("/import-batches/plan-1/active").status_code == 404
+    again = env.upload(build([row(desc="Coffee", merchant="Cafe", amount="4.50")])).json()
+    assert again["count"] == 1 and again["report"]["repeated_export"] is False
+
+
+def test_discard_keeps_rows_already_in_ynab_and_refuses_uncertain_ones(env):
+    from src.models import SourceRecord
+    out = env.upload(build([row(desc="Coffee", merchant="Cafe", amount="4.50"),
+                            row(desc="Bread", merchant="Bakery", amount="3.00")])).json()
+    rows = out["rows"]
+    env.client.patch("/import-rows", json={"updates": [{"id": r["id"], "status": "accepted"} for r in rows]})
+    assert env.write([env.row_ref(rows[0], payee_name="Cafe")], batch_id=out["batch_id"]).json()["created"] == 1
+    # a row that may be in YNAB blocks removal
+    env.db.expire_all()
+    bread = env.db.query(ImportRow).filter_by(id=rows[1]["id"]).one()
+    bread.source_record.write_state = "reconcile_required"
+    env.db.commit()
+    assert env.client.post(f"/import-batches/{out['batch_id']}/discard").status_code == 409
+    bread.source_record.write_state = "unsent"
+    env.db.commit()
+    r = env.client.post(f"/import-batches/{out['batch_id']}/discard")
+    assert r.status_code == 200 and r.json() == {"removed_rows": 1, "kept_rows": 1}
+    env.db.expire_all()
+    left = env.db.query(SourceRecord).all()
+    assert len(left) == 1 and left[0].write_state == "created"       # the pushed one keeps its identity
+    assert env.client.post(f"/import-batches/{out['batch_id']}/discard").status_code == 409   # no longer active
+    assert env.client.post("/import-batches/nope/discard").status_code == 404

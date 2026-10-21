@@ -2,9 +2,9 @@ import { useState, useCallback, useEffect } from 'react';
 import { useQuery, useMutation, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
-  CheckCircle, AlertCircle, XCircle, Settings, BarChart3, LogOut,
+  CheckCircle, AlertCircle, XCircle, Settings, BarChart3, LogOut, Trash2,
 } from 'lucide-react';
-import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, fetchPayees, writeBack, createRule, reclassify, fetchActiveBatch, updateImportRows, completeBatch, reconcileBatch, resolveRow, routeTransfer, reassignAccount } from './api/client';
+import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, fetchPayees, writeBack, createRule, reclassify, fetchActiveBatch, updateImportRows, completeBatch, discardBatch, reconcileBatch, resolveRow, routeTransfer, reassignAccount } from './api/client';
 import type { Plan, ImportRowData, Account, CategoryGroup, PayeeItem, WriteBackResponse, BatchContext, ResolveAction } from './api/client';
 import { handledRowIds, removeHandled, canCompleteBatch, describeImport, SOURCE_LABELS } from './lib/importFlow';
 import ResolutionPanel from './components/ResolutionPanel';
@@ -37,6 +37,8 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
   const [suggestedAccountIds, setSuggestedAccountIds] = useState<string[]>([]);
   const [resolveBusy, setResolveBusy] = useState(false);
   const [resolveWarning, setResolveWarning] = useState<string | null>(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  const [discardError, setDiscardError] = useState<string | null>(null);
 
   const applyBatchContext = (ctx: Partial<BatchContext>) => {
     setBatchContext({
@@ -87,6 +89,42 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
       setReviewRows(toReviewedRows(rows));
     }
   }, [activeBatchQuery.data, batchId]);
+
+  const handleDiscard = async () => {
+    if (!batchId) return;
+    try {
+      await discardBatch(batchId);
+      setBatchId(null);
+      setBatchContext(null);
+      setPredictions([]);
+      setReviewRows([]);
+      setWriteResult(null);
+      setResolveWarning(null);
+      setView('import');
+      queryClient.removeQueries({ queryKey: ['activeBatch', selectedPlanId] });
+    } catch (e) {
+      setDiscardError((e as Error).message);
+    } finally {
+      setConfirmDiscard(false);
+    }
+  };
+
+  const discardControl = batchId ? (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+      {confirmDiscard ? (
+        <>
+          <span style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Remove this import? Rows already in YNAB stay.</span>
+          <button className="btn btn-danger" onClick={handleDiscard}>Remove</button>
+          <button className="btn btn-ghost" onClick={() => setConfirmDiscard(false)}>Cancel</button>
+        </>
+      ) : (
+        <button className="btn btn-ghost" onClick={() => { setDiscardError(null); setConfirmDiscard(true); }}>
+          <Trash2 size={14} /> Remove import
+        </button>
+      )}
+      {discardError && <span style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{discardError}</span>}
+    </span>
+  ) : null;
 
   const syncMutation = useMutation({
     mutationFn: async () => {
@@ -491,9 +529,12 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
                       </p>
                     )}
                   </div>
-                  <button className="btn btn-primary" onClick={() => setView('review')}>
-                    Review & Approve →
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                    {discardControl}
+                    <button className="btn btn-primary" onClick={() => setView('review')}>
+                      Review & Approve →
+                    </button>
+                  </div>
                 </div>
                 <StatsBar predictions={predictions} />
               </section>
@@ -511,7 +552,10 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
         {/* REVIEW */}
         {view === 'review' && (
           <section className="animate-in">
-            <h2 style={{ marginBottom: 8 }}>Review Transactions</h2>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <h2>Review Transactions</h2>
+              {discardControl}
+            </div>
             {batchContext && (
               <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 12 }}>
                 {SOURCE_LABELS[batchContext.source_format] || batchContext.source_format || 'Earlier import'}
