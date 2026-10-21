@@ -18,6 +18,7 @@ export interface ReviewedRow extends Omit<ImportRowData, "status"> {
   status: ReviewStatus;
   editedPayee: string;
   editedCategory: string;
+  editedCategoryId: string | null;
   editedMemo: string;
   flagColor: FlagColor;
 }
@@ -29,6 +30,7 @@ export function toReviewedRows(predictions: ImportRowData[]): ReviewedRow[] {
     status: (p.status as ReviewStatus) || (p.review_required ? 'pending' : 'accepted'),
     editedPayee: p.edited_payee ?? p.payee ?? '',
     editedCategory: p.edited_category ?? p.category ?? '',
+    editedCategoryId: p.edited_category_id ?? p.category_id ?? null,
     editedMemo: p.edited_memo || '',
     flagColor: (p.flag_color || '') as FlagColor,
   }));
@@ -505,7 +507,7 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                       <CategoryPicker
                         value={row.editedCategory}
                         groups={categoryGroups}
-                        onChange={(name) => { onUpdateRow(originalIndex, { editedCategory: name }); setEditingCell(null); }}
+                        onChange={(name, id) => { onUpdateRow(originalIndex, { editedCategory: name, editedCategoryId: id ?? null }); setEditingCell(null); }}
                       />
                     ) : (
                       <span style={{ color: row.editedCategory ? 'var(--text-primary)' : 'var(--text-muted)' }}>

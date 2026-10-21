@@ -73,7 +73,7 @@ def test_training_keeps_labels_aligned_and_queries_once(training_setup, monkeypa
     assert stats['training_rows'] == 3
     clean = lambda text: ml_classifier.normalize(text).cleaned_memo
     assert captured == [[(clean('PAYEE ONLY'), 'Shop 0'), (clean('BOTH LABELS'), 'Shop 1')],
-                        [(clean('CATEGORY ONLY'), 'Category 0'), (clean('BOTH LABELS'), 'Category 1')]]
+                        [(clean('CATEGORY ONLY'), cats[0].id), (clean('BOTH LABELS'), cats[1].id)]]  # stable ids
 
 
 def test_sparse_float32_training_persists_probabilities(training_setup):
@@ -95,3 +95,49 @@ def test_sparse_float32_training_persists_probabilities(training_setup):
     loaded = MLClassifier()
     assert loaded.predict('MIGROS GROCERIES').payee == classifier.predict('MIGROS GROCERIES').payee
     assert loaded.predict('SBB TRAIN TICKET').category == classifier.predict('SBB TRAIN TICKET').category
+
+
+def test_model_dir_keeps_default_models_untouched(training_setup, tmp_path_factory):
+    db, plan, _, payees, cats, add = training_setup
+    for i in range(6):
+        add(f'SHOP {i % 2} PURCHASE {i}', payee=payees[i % 2], category=cats[i % 2])
+    db.commit()
+    default_dir = ml_classifier.MODEL_DIR          # the fixture's stand-in for backend/models
+    before = sorted(p.name for p in default_dir.iterdir())
+    other = tmp_path_factory.mktemp('evaluation') / 'models'
+    stats = MLClassifier(model_dir=other).train(db, plan.id)
+    assert stats['payee_trained'] and stats['category_trained']
+    assert sorted(p.name for p in other.iterdir()) == sorted([ml_classifier.CATEGORY_MODEL_PATH.name, ml_classifier.PAYEE_MODEL_PATH.name])
+    assert sorted(p.name for p in default_dir.iterdir()) == before
+    reloaded = MLClassifier(model_dir=other)
+    assert reloaded.payee_pipeline is not None and reloaded.category_pipeline is not None
+
+
+def test_machine_guesses_and_split_parents_are_not_learned(training_setup, monkeypatch):
+    from src.historical_matcher import HistoricalMatcher
+    db, plan, _, payees, cats, add = training_setup
+    add('TRUSTED SHOP', payee=payees[0], category=cats[0])
+    add('APP CONFIRMED', payee=payees[0], category=cats[0], provenance='app_confirmed')
+    add('MACHINE GUESS', payee=payees[1], category=cats[1], provenance='app_unreviewed', import_id='YF1:x:1')
+    add('SPLIT PARENT', payee=payees[1], category=cats[1], provenance='split_parent', is_split=True)
+    add('DELETED', payee=payees[0], category=cats[0], deleted=True)
+    add('', payee=payees[0], category=cats[0])
+    db.commit()
+    captured = []
+
+    class RecordingPipeline:
+        def fit(self, texts, labels):
+            captured.append(texts)
+
+    classifier = MLClassifier()
+    monkeypatch.setattr(classifier, '_build_pipeline', RecordingPipeline)
+    monkeypatch.setattr(classifier, '_save_models', lambda: None)
+    stats = classifier.train(db, plan.id)
+    learned = {t for texts in captured for t in texts}
+    clean = lambda text: ml_classifier.normalize(text).cleaned_memo
+    assert clean('MACHINE GUESS') not in learned and clean('SPLIT PARENT') not in learned
+    assert stats['training_rows'] == 2
+    assert stats['excluded'] == {'app_unreviewed': 1, 'deleted': 1, 'no_description': 1, 'split_parent': 1}
+    history = HistoricalMatcher(db, plan.id)
+    assert history.match(clean('MACHINE GUESS'), '') is None or history.match(clean('MACHINE GUESS'), '').source_type != 'exact'
+    assert history.match(clean('TRUSTED SHOP'), '').source_type == 'exact'

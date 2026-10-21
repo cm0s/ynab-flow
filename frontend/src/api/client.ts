@@ -36,6 +36,7 @@ export const fetchPlans = () => request<Plan[]>('/plans');
 /* ---- Upload CSV ---- */
 export interface PredictionRow {
   row_index: number;
+  category_id?: string | null;
   date: string;
   original_memo: string;
   cleaned_memo: string;
@@ -60,6 +61,7 @@ export interface ImportRowData extends PredictionRow {
   status: string;
   edited_payee: string;
   edited_category: string;
+  edited_category_id?: string | null;
   edited_memo: string;
   flag_color: string;
   amount_milliunits?: number | null;
@@ -165,10 +167,41 @@ export async function syncPlanData(planId: string, full = false, onProgress?: (m
   return job;
 }
 
+export interface TargetScore { examples: number; correct: number; accuracy: number }
+
+export interface ModelVersionInfo {
+  id: string;
+  status: 'candidate' | 'active' | 'retired' | 'rejected';
+  note: string;
+  created_at: string | null;
+  activated_at: string | null;
+  training: { training_rows?: number; payee_examples?: number; category_examples?: number };
+  excluded: Record<string, number>;
+  comparison: {
+    holdout_from?: string | null;
+    holdout_examples?: number;
+    candidate?: Record<'payee' | 'category', TargetScore | null>;
+    active?: Record<'payee' | 'category', TargetScore | null> | null;
+  };
+  files_present: boolean;
+}
+
+export interface TrainResult {
+  status: 'promoted' | 'not_promoted';
+  promoted: boolean;
+  note: string;
+  version: ModelVersionInfo | null;
+}
+
+export const fetchModels = () => request<{ versions: ModelVersionInfo[] }>('/models');
+
+export const activateModel = (versionId: string) =>
+  request<ModelVersionInfo>(`/models/${versionId}/activate`, { method: 'POST' });
+
 export async function trainModels(planId: string) {
   const signal = AbortSignal.timeout(120_000);
   try {
-    return await request<{ status: string }>(`/train?plan_id=${planId}`, { method: 'POST', signal });
+    return await request<TrainResult>(`/train?plan_id=${planId}`, { method: 'POST', signal });
   } catch (error) {
     if (signal.aborted || error instanceof TypeError) {
       throw new Error('Lost connection to the server during model training. It may still be running or may have restarted. Wait a moment before retrying.');
@@ -201,6 +234,7 @@ export interface ImportRowUpdate {
   status?: string;
   edited_payee?: string;
   edited_category?: string;
+  edited_category_id?: string;
   edited_memo?: string;
   flag_color?: string;
 }
@@ -297,6 +331,7 @@ export interface WriteBackRow {
   row_id: string;
   payee_name: string;
   category_name: string;
+  category_id?: string;
   memo: string;
   flag_color?: string;
 }

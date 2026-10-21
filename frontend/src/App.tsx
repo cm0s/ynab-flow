@@ -165,6 +165,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
         row_id: r.id,
         payee_name: r.editedPayee,
         category_name: r.editedCategory,
+        category_id: r.editedCategoryId || undefined,
         memo: r.editedMemo || r.original_memo,
         flag_color: r.flagColor || undefined,
       }));
@@ -218,6 +219,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
         status: update.status ?? row.status,
         edited_payee: update.editedPayee ?? row.editedPayee,
         edited_category: update.editedCategory ?? row.editedCategory,
+        edited_category_id: row.editedCategoryId || undefined,
         edited_memo: update.editedMemo ?? row.editedMemo ?? '',
         flag_color: update.flagColor ?? row.flagColor ?? '',
       }]).catch(() => {});

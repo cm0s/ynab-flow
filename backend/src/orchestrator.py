@@ -17,6 +17,7 @@ from src.normalizer import normalize, NormalizationResult
 from src.rule_engine import RuleEngine
 from src.historical_matcher import HistoricalMatcher
 from src.ml_classifier import MLClassifier
+from src.categories import CategoryDirectory
 
 
 # Confidence thresholds (FR-6.3). Operational scores, not measured accuracy.
@@ -32,7 +33,7 @@ class PredictionResult:
     cleaned_memo: str
     merchant_stem: str
     payee: Optional[str] = None
-    category: Optional[str] = None
+    category: Optional[str] = None   # display name of category_id
     confidence: float = 0.0          # aggregate: minimum over required targets (missing = 0)
     source: str = "unclassified"     # strongest evidence source across targets
     explanation: str = ""
@@ -46,6 +47,7 @@ class PredictionResult:
     payee_explanation: str = ""
     category_explanation: str = ""
     review_flag: bool = False        # explicit review request (rule); never cleared by later evidence
+    category_id: Optional[str] = None  # stable local category id (None when a name cannot be resolved)
 
 
 class Orchestrator:
@@ -62,6 +64,7 @@ class Orchestrator:
         self.rule_engine = RuleEngine(db, plan_id)
         self.history = HistoricalMatcher(db, plan_id)
         self.ml = ml_classifier or MLClassifier()
+        self.categories = CategoryDirectory(db, plan_id)
 
     def predict(
         self,
@@ -92,7 +95,7 @@ class Orchestrator:
             if rule_match.assign_payee:
                 self._set(result, "payee", rule_match.assign_payee, 1.0, "rule", note)
             if rule_match.assign_category:
-                self._set(result, "category", rule_match.assign_category, 1.0, "rule", note)
+                self._set_category(result, rule_match.assign_category, 1.0, "rule", note)
             result.review_flag = bool(rule_match.flag_review)
             result.flag_ignore = bool(rule_match.flag_ignore)
             if result.flag_ignore:
@@ -111,8 +114,9 @@ class Orchestrator:
                 source = "exact_history" if hist.source_type == "exact" else "fuzzy_history"
                 if hist.payee:
                     self._set(result, "payee", hist.payee, hist.payee_confidence, source, hist.explanation, fill=True)
-                if hist.category:
-                    self._set(result, "category", hist.category, hist.category_confidence, source, hist.explanation, fill=True)
+                if hist.category_id or hist.category:
+                    self._set_category(result, hist.category_id or hist.category, hist.category_confidence,
+                                       source, hist.explanation, fill=True)
 
         # ML (FR-6) fills anything still missing
         if self._missing(result, require_category):
@@ -121,8 +125,8 @@ class Orchestrator:
                 self._set(result, "payee", ml_pred.payee, ml_pred.payee_confidence, "ml",
                           f"ML prediction ({ml_pred.payee_confidence:.0%}).", fill=True)
             if ml_pred.category and ml_pred.category_confidence > 0:
-                self._set(result, "category", ml_pred.category, ml_pred.category_confidence, "ml",
-                          f"ML prediction ({ml_pred.category_confidence:.0%}).", fill=True)
+                self._set_category(result, ml_pred.category, ml_pred.category_confidence, "ml",
+                                   f"ML prediction ({ml_pred.category_confidence:.0%}).", fill=True)
 
         return self._finish(result, require_category)
 
@@ -136,6 +140,16 @@ class Orchestrator:
         setattr(result, f"{target}_confidence", round(float(confidence), 4))
         setattr(result, f"{target}_source", source)
         setattr(result, f"{target}_explanation", explanation)
+
+    def _set_category(self, result, label, confidence, source, explanation, fill=False):
+        """Set the category from an id (or a rule/legacy-model name), keeping the id and display name."""
+        if fill and result.category:
+            return
+        category_id, name = self.categories.identify(label)
+        if category_id and self.categories.is_deleted(category_id):
+            return  # never suggest a deleted category; the target stays missing and needs review
+        self._set(result, "category", name, confidence, source, explanation)
+        result.category_id = category_id
 
     @staticmethod
     def _missing(result, require_category):

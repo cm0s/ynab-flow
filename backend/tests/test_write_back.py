@@ -294,3 +294,42 @@ def test_sent_values_are_recorded_even_when_the_request_differs_from_the_stored_
     stored = env.db.query(ImportRow).filter_by(id=rows[0]["id"]).one()
     env.db.refresh(stored)
     assert stored.payee != "Shop" and (stored.sent_payee, stored.sent_category) == ("Shop", "Groceries")
+
+
+def test_write_back_uses_the_stored_category_id_even_after_a_rename(env):
+    from src.models import Rule
+    env.db.add(Rule(plan_id="plan-1", name="Shop", priority=1, match_type="contains", pattern="SHOP ONE",
+                    assign_payee="Shop", assign_category="Groceries"))
+    env.db.commit()
+    _, rows = upload(env, SHOP)
+    assert (rows[0]["category"], rows[0]["category_id"], rows[0]["edited_category_id"]) == ("Groceries", "c1", "c1")
+    env.groceries.name = "Food"                         # renamed in YNAB after the upload
+    env.db.commit()
+    assert env.write([env.row_ref(rows[0], payee_name="Shop", category_name="Groceries")]).json()["created"] == 1
+    assert env.post_bodies[0]["transactions"][0]["category_id"] == "y-c1"
+    stored = env.db.query(ImportRow).filter_by(id=rows[0]["id"]).one()
+    env.db.refresh(stored)
+    assert stored.sent_category_id == "c1"
+
+
+def test_picker_edit_by_id_and_deleted_category_blocks_the_push(env):
+    from src.models import Category
+    env.db.add(Category(id="c2", category_group_id="g1", ynab_category_id="y-c2", name="Transport"))
+    env.db.commit()
+    _, rows = upload(env, SHOP)
+    r = env.client.patch("/import-rows", json={"updates": [{"id": rows[0]["id"], "status": "accepted", "edited_category_id": "c2"}]})
+    assert r.status_code == 200
+    row = env.client.get("/import-batches/plan-1/active").json()["rows"][0]
+    assert (row["edited_category"], row["edited_category_id"]) == ("Transport", "c2")
+    bad = env.client.patch("/import-rows", json={"updates": [{"id": rows[0]["id"], "edited_category_id": "nope"}]})
+    assert bad.status_code == 422
+    env.db.get(Category, "c2").deleted = True
+    env.db.commit()
+    res = env.write([env.row_ref(row, payee_name="Shop", category_id="c2")]).json()
+    assert res["errors"] == 1 and "deleted" in res["results"][0]["error"] and env.post_bodies == []
+    # by-name edit from an older client resolves to the unique live category
+    env.client.patch("/import-rows", json={"updates": [{"id": rows[0]["id"], "edited_category": "Groceries"}]})
+    row = env.client.get("/import-batches/plan-1/active").json()["rows"][0]
+    assert row["edited_category_id"] == "c1"
+    assert env.write([env.row_ref(row, payee_name="Shop")]).json()["created"] == 1
+    assert env.post_bodies[-1]["transactions"][0]["category_id"] == "y-c1"

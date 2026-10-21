@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Boolean, Float, Integer, BigInteger, DateTime, ForeignKey, Text, UniqueConstraint
+from sqlalchemy import Column, String, Boolean, Float, Integer, BigInteger, DateTime, ForeignKey, Text, UniqueConstraint, false as sa_false
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -74,6 +74,10 @@ class Payee(Base):
     plan = relationship("Plan")
     transactions = relationship("Transaction", back_populates="payee")
 
+# Provenance values whose labels may be learned (unreviewed machine guesses and split parents may not)
+TRUSTED_PROVENANCE = ("external", "app_confirmed", "app_corrected")
+
+
 class Transaction(Base):
     __tablename__ = 'transactions'
 
@@ -96,6 +100,9 @@ class Transaction(Base):
     import_id = Column(String, nullable=True, index=True)
     transfer_account_ynab_id = Column(String, nullable=True)
     transfer_transaction_ynab_id = Column(String, nullable=True)
+    # Learning provenance: external | app_unreviewed | app_confirmed | app_corrected | split_parent
+    provenance = Column(String, nullable=False, default="external", server_default="external")
+    is_split = Column(Boolean, nullable=False, default=False, server_default=sa_false())
 
     plan = relationship("Plan")
     account = relationship("Account", back_populates="transactions")
@@ -183,6 +190,10 @@ class ImportRow(Base):
     # Payee/category actually sent to YNAB, kept for audit even if they differ from the stored suggestion or edits
     sent_payee = Column(String, nullable=True)
     sent_category = Column(String, nullable=True)
+    sent_category_id = Column(String, nullable=True)
+    # Stable category identity (local categories.id); names above are display values
+    category_id = Column(String, nullable=True)
+    edited_category_id = Column(String, nullable=True)
 
     batch = relationship("ImportBatch", back_populates="rows")
     source_record = relationship("SourceRecord")
@@ -264,3 +275,18 @@ class SyncJob(Base):
     status = Column(String, nullable=False)
     message = Column(String, nullable=False)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class ModelVersion(Base):
+    """A trained classifier version: what it learned from, how it compared, and whether it serves."""
+    __tablename__ = 'model_versions'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    status = Column(String, nullable=False, default="candidate")  # candidate | active | retired | rejected
+    created_at = Column(DateTime, default=datetime.utcnow)
+    activated_at = Column(DateTime, nullable=True)
+    plan_id = Column(String, nullable=True)
+    training_json = Column(Text, nullable=False, default="{}")    # example counts per target
+    exclusions_json = Column(Text, nullable=False, default="{}")  # excluded examples per reason
+    comparison_json = Column(Text, nullable=False, default="{}")  # held-out metrics: candidate vs active
+    note = Column(String, nullable=False, default="")

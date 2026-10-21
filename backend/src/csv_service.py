@@ -142,6 +142,7 @@ class BulkPredictionRow:
     category_explanation: str = ""
     review_flag: bool = False
     transfer_state: str = "none"
+    category_id: Optional[str] = None
 
 
 def _is_postfinance(file_content: str) -> bool:
@@ -395,7 +396,7 @@ def bulk_predict(
         if repayment.is_transfer and not pred.flag_ignore:
             # Repayment candidate: no ordinary payee/category until routing is confirmed
             transfer_state = "candidate"
-            pred.payee = pred.category = None
+            pred.payee = pred.category = pred.category_id = None
             pred.payee_confidence = pred.category_confidence = 0.0
             pred.payee_source = pred.category_source = "unclassified"
             pred.confidence = 0.0
@@ -414,6 +415,7 @@ def bulk_predict(
             source_category=txn.source_category,
             payee=pred.payee,
             category=pred.category,
+            category_id=pred.category_id,
             confidence=pred.confidence,
             source=pred.source,
             explanation=pred.explanation,
