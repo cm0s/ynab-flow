@@ -297,6 +297,37 @@ class HistoricalMatcher:
             explanation=f"Fuzzy match (confidence: {confidence:.0%}).",
         )
 
+    def examples(
+        self, normalized_memo: str, merchant_stem: str, amount: float = 0.0, account_id: str = "", limit: int = 8,
+    ) -> List[dict]:
+        """The most similar trusted past transactions (exact memo first), grouped with a count, for AI context."""
+        query_trigrams = _trigrams(normalized_memo)
+        min_overlap = max(1, len(query_trigrams) // 5)
+        scored = []
+        for ct in self._cache:
+            exact = ct.cleaned_memo.upper() == normalized_memo.upper()
+            if not exact and len(query_trigrams & ct.memo_trigrams) < min_overlap:
+                continue
+            score = 1.0 if exact else self._similarity_score(
+                normalized_memo, merchant_stem, amount, account_id,
+                ct.cleaned_memo, ct.merchant_stem, ct.amount, ct.account_id)
+            if score >= 0.5:
+                scored.append((score, ct))
+        grouped: Dict[tuple, dict] = {}
+        for score, ct in sorted(scored, key=lambda x: -x[0]):
+            key = (ct.cleaned_memo, ct.payee_name, ct.category_id)
+            if key in grouped:
+                grouped[key]["count"] += 1
+                continue
+            if len(grouped) >= limit:
+                continue
+            grouped[key] = {
+                "memo": ct.cleaned_memo, "payee": ct.payee_name, "category_id": ct.category_id,
+                "category": self._category_names.get(ct.category_id) if ct.category_id else None,
+                "amount": round(ct.amount, 2), "similarity": round(score, 2), "count": 1,
+            }
+        return list(grouped.values())
+
     @staticmethod
     def _similarity_score(
         memo1: str, stem1: str, amount1: float, account1: str,

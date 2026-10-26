@@ -8,11 +8,13 @@ export function CategoryPicker({
   groups,
   onChange,
   inputStyle,
+  autoFocus = true,
 }: {
   value: string;
   groups: CategoryGroup[];
   onChange: (name: string, id?: string) => void;
   inputStyle?: React.CSSProperties;
+  autoFocus?: boolean;
 }) {
   const [query, setQuery] = useState('');
   const [open, setOpen] = useState(false);
@@ -53,7 +55,7 @@ export function CategoryPicker({
     <>
       <input
         ref={inputRef}
-        autoFocus
+        autoFocus={autoFocus}
         value={query}
         onChange={(e) => { setQuery(e.target.value); setOpen(true); }}
         onFocus={() => setOpen(true)}

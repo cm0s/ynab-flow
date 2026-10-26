@@ -106,6 +106,14 @@ class Env:
         return base
 
 
+@pytest.fixture(autouse=True)
+def no_local_mail_or_ai_settings(monkeypatch):
+    """backend/.env is loaded on import; its real Bridge and AI settings must never reach a test."""
+    for key in list(os.environ):
+        if key.startswith(("BRIDGE_", "AI_", "ANTHROPIC_")):
+            monkeypatch.delenv(key)
+
+
 @pytest.fixture()
 def env(monkeypatch):
     from src.main import app

@@ -102,3 +102,29 @@ def test_category_ids_and_provenance_backfill(tmp_path, monkeypatch):
         assert "model_versions" in sa.inspect(engine).get_table_names()
     command.downgrade(cfg, "a1b2c3d4e5f6")
     assert "model_versions" not in sa.inspect(sa.create_engine(url)).get_table_names()
+
+
+def test_receipts_ai_splits_upgrade_and_downgrade(tmp_path, monkeypatch):
+    url = f"sqlite:///{tmp_path / 'phase3.db'}"
+    cfg = _config(url, monkeypatch)
+    command.upgrade(cfg, "b2c3d4e5f6a7")
+    engine = sa.create_engine(url)
+    with engine.begin() as c:
+        c.execute(sa.text("INSERT INTO plans (id, ynab_plan_id, name) VALUES ('p','yp','P')"))
+        c.execute(sa.text("INSERT INTO import_batches (id, plan_id, status) VALUES ('b','p','active')"))
+        c.execute(sa.text("INSERT INTO import_rows (id, batch_id, row_index, date, original_memo, amount, edited_category)"
+                          " VALUES ('r1','b',0,'2026-01-01','m',-1.0,'')"))
+    command.upgrade(cfg, "head")
+    insp = sa.inspect(engine)
+    new_tables = {"mailbox_cursors", "receipts", "receipt_sources", "receipt_matches", "import_row_splits", "ai_usage"}
+    assert new_tables <= set(insp.get_table_names())
+    cols = {c["name"] for c in insp.get_columns("import_rows")}
+    assert {"ai_payee", "ai_category_id", "ai_splits_json", "ai_status", "alternatives_json", "sent_splits_json"} <= cols
+    with engine.connect() as c:
+        assert c.execute(sa.text("SELECT ai_status FROM import_rows WHERE id='r1'")).scalar() == "none"
+    command.downgrade(cfg, "b2c3d4e5f6a7")
+    insp = sa.inspect(sa.create_engine(url))
+    assert not (new_tables & set(insp.get_table_names()))
+    assert "ai_status" not in {c["name"] for c in insp.get_columns("import_rows")}
+    with sa.create_engine(url).connect() as c:
+        assert c.execute(sa.text("SELECT count(*) FROM import_rows")).scalar() == 1

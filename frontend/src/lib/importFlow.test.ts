@@ -1,7 +1,7 @@
 // Local mocked workflow checks: run with `pnpm run test:flow` (node's built-in runner).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handledRowIds, removeHandled, canCompleteBatch, needsResolution, describeImport } from './importFlow.ts';
+import { handledRowIds, removeHandled, canCompleteBatch, needsResolution, describeImport, aiEligible } from './importFlow.ts';
 
 const result = (mode: string, statuses: [string, string][]) => ({
   mode,
@@ -46,4 +46,18 @@ test('import summary shows counts', () => {
   assert.equal(describeImport({ detected: 174, eligible: 167, pending: 7, invalid: 0 }),
     '174 detected · 167 eligible · 7 pending (not imported)');
   assert.equal(describeImport(undefined), '');
+});
+
+test('AI is offered only for rows not settled by edits, rules or confident history', () => {
+  const base = {
+    status: 'pending', transfer_state: 'none', amount_milliunits: -5000, payee: 'Shop', category: 'Food',
+    payee_source: 'ml', category_source: 'fuzzy_history', payee_confidence: 0.4, category_confidence: 0.8,
+    editedPayee: 'Shop', editedCategory: 'Food',
+  };
+  assert.equal(aiEligible(base), true);
+  assert.equal(aiEligible({ ...base, payee_source: 'rule', category_source: 'exact_history', category_confidence: 1 }), false);
+  assert.equal(aiEligible({ ...base, editedPayee: 'Mine', editedCategory: 'Other' }), false);
+  assert.equal(aiEligible({ ...base, editedPayee: 'Mine' }), true);   // category still open
+  assert.equal(aiEligible({ ...base, transfer_state: 'resolved' }), false);
+  assert.equal(aiEligible({ ...base, status: 'ignored' }), false);
 });

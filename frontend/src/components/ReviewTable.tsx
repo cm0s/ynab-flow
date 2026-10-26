@@ -1,11 +1,13 @@
-import { useState, useMemo, useCallback, useRef } from 'react';
+import { Fragment, useState, useMemo, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import type { ImportRowData, CategoryGroup, PayeeItem } from '../api/client';
 import { CategoryPicker, PayeePicker } from './SearchablePicker';
+import SplitEditor, { type SplitSuggestion } from './SplitEditor';
+import ReceiptBadge from './ReceiptBadge';
 import {
   CheckCircle, AlertTriangle, HelpCircle, Zap, Clock, Brain,
   Check, X, Eye, EyeOff, Filter, CheckCheck, Search,
-  ArrowUp, ArrowDown, ArrowUpDown, Flag,
+  ArrowUp, ArrowDown, ArrowUpDown, Flag, Split, Sparkles,
 } from 'lucide-react';
 
 /* ---- Review state per row ---- */
@@ -36,6 +38,40 @@ export function toReviewedRows(predictions: ImportRowData[]): ReviewedRow[] {
   }));
 }
 
+/** "Use receipt split" from the linked receipt's items that fit this row. */
+function receiptSplitSuggestions(row: ImportRowData): SplitSuggestion[] {
+  const linked = (row.receipts ?? []).find((r) => r.state === 'linked' && r.role === 'primary');
+  return linked && linked.split_suggestion.length >= 2
+    ? [{ label: 'Use receipt split', lines: linked.split_suggestion }]
+    : [];
+}
+
+const AI_PROBLEMS: Record<string, string> = {
+  invalid: 'AI invalid', refused: 'AI declined', error: 'AI failed', skipped_budget: 'AI budget reached',
+};
+
+/** Tooltip text: the AI's reasons and evidence, plus suggestions that lost to higher-ranked sources. */
+function evidenceTooltip(row: ImportRowData): string {
+  const parts = [row.explanation];
+  if (row.ai?.status === 'suggested') {
+    parts.push(`AI (${row.ai.uncertainty} uncertainty): ${row.ai.explanation ?? ''}`);
+    if (row.ai.evidence.length) parts.push(`AI evidence: ${row.ai.evidence.map((e) => `${e.kind}: ${e.ref}`).join('; ')}`);
+  }
+  for (const target of ['payee', 'category'] as const) {
+    const alts = row.alternatives?.[target] ?? [];
+    if (alts.length) {
+      parts.push(`Other ${target} suggestions: ${alts.map((a) => `${a.value} (${a.source.replace('_', ' ')} ${(a.confidence * 100).toFixed(0)}%)`).join(', ')}`);
+    }
+  }
+  return parts.filter(Boolean).join('\n');
+}
+
+function aiSplitSuggestions(row: ImportRowData): SplitSuggestion[] {
+  return row.ai?.status === 'suggested' && row.ai.splits.length >= 2
+    ? [{ label: 'Use AI split', lines: row.ai.splits }]
+    : [];
+}
+
 /* ---- Filter options ---- */
 type FilterKey = 'all' | 'pending' | 'accepted' | 'ignored';
 
@@ -45,6 +81,7 @@ const sourceIcon = (source: string) => {
     case 'exact_history': return <CheckCircle size={14} />;
     case 'fuzzy_history': return <Clock size={14} />;
     case 'ml': return <Brain size={14} />;
+    case 'ai': return <Sparkles size={14} />;
     default: return <HelpCircle size={14} />;
   }
 };
@@ -55,6 +92,7 @@ const sourceBadge = (source: string) => {
     exact_history: 'badge-success',
     fuzzy_history: 'badge-info',
     ml: 'badge-warning',
+    ai: 'badge-accent',
     unclassified: 'badge-danger',
   };
   return map[source] || 'badge-danger';
@@ -66,6 +104,7 @@ const sourceTooltip = (source: string) => {
     exact_history: 'Exact match found in historical YNAB transactions',
     fuzzy_history: 'Similar match found in historical transactions using fuzzy text matching',
     ml: 'Predicted by the machine-learning classifier (TF-IDF + Logistic Regression)',
+    ai: 'Suggested by AI. AI suggestions always need your review',
     unclassified: 'No match found — requires manual classification',
   };
   return tips[source] || 'Unknown classification source';
@@ -164,13 +203,15 @@ interface Props {
   onBulkAction: (indices: number[], status: ReviewStatus) => void;
   onCreateRule?: (row: ReviewedRow) => void;
   changedRows?: Set<number>;
+  onRowReplaced?: (row: ImportRowData) => void;
+  splitSuggestions?: (row: ReviewedRow) => SplitSuggestion[];
 }
 
 type SortKey = 'date' | 'memo' | 'amount' | 'payee' | 'category' | 'source_category' | 'source' | 'confidence' | 'status';
 type SortDir = 'asc' | 'desc';
 type EditableField = 'memo' | 'payee' | 'category';
 
-export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow, onBulkAction, onCreateRule, changedRows }: Props) {
+export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow, onBulkAction, onCreateRule, changedRows, onRowReplaced, splitSuggestions }: Props) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -178,6 +219,11 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
   const [editingCell, setEditingCell] = useState<{ row: number; field: EditableField } | null>(null);
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>('asc');
+  const [splitRowId, setSplitRowId] = useState<string | null>(null);
+  const categoryNames = useMemo(
+    () => new Map(categoryGroups.flatMap((g) => g.categories.map((c) => [c.id, c.name] as const))),
+    [categoryGroups],
+  );
 
   const toggleSort = useCallback((key: SortKey) => {
     if (sortKey === key) {
@@ -412,9 +458,11 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
 
               const displayMemo = row.editedMemo || row.original_memo;
 
+              const splitCount = row.splits?.length ?? 0;
+
               return (
+                <Fragment key={row.id}>
                 <tr
-                  key={originalIndex}
                   className={`animate-in${changedRows?.has(row.row_index) ? ' row-changed' : ''}${isSelected ? ' row-selected' : ''}`}
                   style={{
                     opacity: row.status === 'ignored' ? 0.4 : 1,
@@ -471,7 +519,10 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                         }}
                       />
                     ) : (
-                      <span>{displayMemo}</span>
+                      <span>
+                        {displayMemo}
+                        {onRowReplaced && <ReceiptBadge row={row} onRowReplaced={onRowReplaced} />}
+                      </span>
                     )}
                   </td>
 
@@ -503,7 +554,11 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                     className={`no-truncate${isSelected && !isEditingField('category') ? ' cell-editable' : ''}`}
                     onClick={(e) => handleCellClick('category', e)}
                   >
-                    {isEditingField('category') ? (
+                    {splitCount > 0 && !isEditingField('category') ? (
+                      <span className="badge badge-info" title={row.splits?.map((l) => `${categoryNames.get(l.category_id) ?? 'Unknown category'} ${(Math.abs(l.amount_milliunits) / 1000).toFixed(2)}`).join(' · ')}>
+                        <Split size={12} /> Split ({splitCount})
+                      </span>
+                    ) : isEditingField('category') ? (
                       <CategoryPicker
                         value={row.editedCategory}
                         groups={categoryGroups}
@@ -523,16 +578,21 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
 
                   {/* Source badge */}
                   <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>
-                    <span className={`badge ${sourceBadge(row.source)}`} title={sourceTooltip(row.source)}>
+                    <span className={`badge ${sourceBadge(row.source)}`} title={`${sourceTooltip(row.source)}\n${evidenceTooltip(row)}`}>
                       {sourceIcon(row.source)} {row.source.replace('_', ' ')}
                     </span>
+                    {row.ai && AI_PROBLEMS[row.ai.status] && (
+                      <span className="badge badge-danger" style={{ marginLeft: 4 }} title={row.ai.explanation ?? ''}>
+                        {AI_PROBLEMS[row.ai.status]}
+                      </span>
+                    )}
                   </td>
 
                   {/* Confidence */}
                   <td style={{ whiteSpace: 'nowrap', textOverflow: 'clip' }}>
                     <div
                       style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-                      title={`Payee ${((row.payee_confidence ?? 0) * 100).toFixed(0)}% (${row.payee_source ?? 'n/a'}) · Category ${((row.category_confidence ?? 0) * 100).toFixed(0)}% (${row.category_source ?? 'n/a'}). Confidence is an operational score, not measured accuracy. ${row.explanation}`}
+                      title={`Payee ${((row.payee_confidence ?? 0) * 100).toFixed(0)}% (${row.payee_source ?? 'n/a'}) · Category ${((row.category_confidence ?? 0) * 100).toFixed(0)}% (${row.category_source ?? 'n/a'}). Confidence is an operational score, not measured accuracy.\n${evidenceTooltip(row)}`}
                     >
                       <div className="confidence-bar">
                         <div
@@ -582,6 +642,16 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                           <Zap size={14} color="var(--accent-light)" />
                         </button>
                       )}
+                      {onRowReplaced && (
+                        <button
+                          className={`btn btn-ghost${splitRowId === row.id ? ' btn-secondary' : ''}`}
+                          style={{ padding: '4px 8px' }}
+                          onClick={() => setSplitRowId(splitRowId === row.id ? null : row.id)}
+                          title="Split across categories"
+                        >
+                          <Split size={14} />
+                        </button>
+                      )}
                       {row.status !== 'accepted' && (
                         <button
                           className="btn btn-ghost"
@@ -605,6 +675,19 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                     </div>
                   </td>
                 </tr>
+                {splitRowId === row.id && onRowReplaced && (
+                  <tr className="row-selected">
+                    <td colSpan={12}>
+                      <SplitEditor
+                        row={row}
+                        categoryGroups={categoryGroups}
+                        suggestions={[...receiptSplitSuggestions(row), ...aiSplitSuggestions(row), ...(splitSuggestions?.(row) ?? [])]}
+                        onSaved={onRowReplaced}
+                      />
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               );
             })}
           </tbody>

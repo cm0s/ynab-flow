@@ -4,13 +4,16 @@ import { Settings as SettingsIcon, Key, Gauge, Shield, RefreshCw, Loader2, Brain
 import { syncBudgets, syncPlanData, trainModels, fetchCategories, fetchPayees, fetchModels, activateModel } from '../api/client';
 import type { CategoryGroup, PayeeItem, ModelVersionInfo, TargetScore } from '../api/client';
 import RulesManager from './RulesManager';
+import MailboxSettings from './MailboxSettings';
+import AISettings from './AISettings';
 
 interface Props {
   planId: string;
   onRuleChanged?: () => void;
+  onReceiptsFetched?: () => void;
 }
 
-export default function SettingsPage({ planId, onRuleChanged }: Props) {
+export default function SettingsPage({ planId, onRuleChanged, onReceiptsFetched }: Props) {
   const queryClient = useQueryClient();
   const [autoApproveThreshold, setAutoApproveThreshold] = useState(95);
   const [reviewThreshold, setReviewThreshold] = useState(75);
@@ -177,6 +180,9 @@ export default function SettingsPage({ planId, onRuleChanged }: Props) {
               </p>
             )}
           </div>
+
+          <MailboxSettings onFetched={onReceiptsFetched} />
+          <AISettings />
 
           {/* ML Training */}
           <div className="card" style={{ padding: 24 }}>

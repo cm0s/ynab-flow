@@ -195,8 +195,40 @@ class ImportRow(Base):
     category_id = Column(String, nullable=True)
     edited_category_id = Column(String, nullable=True)
 
+    # AI suggestion (review-only), kept separately from the merged prediction above
+    ai_payee = Column(String, nullable=True)
+    ai_category_id = Column(String, nullable=True)
+    ai_splits_json = Column(Text, nullable=True)
+    ai_explanation = Column(String, nullable=True)   # or the reason an AI result was not used
+    ai_uncertainty = Column(String, nullable=True)   # low | medium | high
+    ai_evidence_json = Column(Text, nullable=True)
+    ai_status = Column(String, nullable=False, default="none", server_default="none")  # none | suggested | invalid | refused | error | skipped_budget
+    ai_model = Column(String, nullable=True)
+    ai_requested_at = Column(DateTime, nullable=True)
+    alternatives_json = Column(Text, nullable=True)  # suggestions replaced by higher-ranked sources
+    sent_splits_json = Column(Text, nullable=True)   # split lines actually sent to YNAB
+
     batch = relationship("ImportBatch", back_populates="rows")
     source_record = relationship("SourceRecord")
+    splits = relationship("ImportRowSplit", order_by="ImportRowSplit.position",
+                          cascade="all, delete-orphan", back_populates="row")
+    receipt_matches = relationship("ReceiptMatch", cascade="all, delete-orphan", back_populates="row")
+
+
+class ImportRowSplit(Base):
+    """One category line of a split import row; lines sum exactly to the row's bank amount."""
+    __tablename__ = 'import_row_splits'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    row_id = Column(String, ForeignKey('import_rows.id'), nullable=False, index=True)
+    position = Column(Integer, nullable=False, default=0)
+    amount_milliunits = Column(BigInteger, nullable=False)
+    category_id = Column(String, nullable=False)   # local categories.id
+    payee = Column(String, nullable=False, default="")
+    memo = Column(String, nullable=False, default="")
+    origin = Column(String, nullable=False, default="user")  # receipt | ai | user
+
+    row = relationship("ImportRow", back_populates="splits")
 
 
 class SourceRecord(Base):
@@ -275,6 +307,102 @@ class SyncJob(Base):
     status = Column(String, nullable=False)
     message = Column(String, nullable=False)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class MailboxCursor(Base):
+    """How far each mailbox folder has been read (UIDs are only valid within one UIDVALIDITY)."""
+    __tablename__ = 'mailbox_cursors'
+    __table_args__ = (UniqueConstraint('mailbox', 'folder', name='uq_mailbox_folder'),)
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    mailbox = Column(String, nullable=False)
+    folder = Column(String, nullable=False)
+    uidvalidity = Column(BigInteger, nullable=True)
+    last_uid = Column(BigInteger, nullable=False, default=0)
+    last_fetch_at = Column(DateTime, nullable=True)
+    last_error = Column(String, nullable=False, default="")
+
+
+class Receipt(Base):
+    """Purchase evidence extracted from one email, deduplicated across mailboxes by content hash."""
+    __tablename__ = 'receipts'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    content_hash = Column(String, nullable=False, unique=True)
+    status = Column(String, nullable=False, default="candidate")  # candidate | extracted | needs_check | not_receipt | error
+    kind = Column(String, nullable=False, default="purchase")     # purchase | refund | shipping | payment
+    merchant = Column(String, nullable=False, default="")
+    reference = Column(String, nullable=False, default="")
+    purchase_date = Column(String, nullable=True)                 # YYYY-MM-DD
+    total_milliunits = Column(BigInteger, nullable=True)          # positive amount in the receipt currency
+    currency = Column(String, nullable=False, default="")
+    items_json = Column(Text, nullable=False, default="[]")
+    card_hint = Column(String, nullable=False, default="")        # last four card digits when mentioned
+    extraction_method = Column(String, nullable=False, default="")  # text | pdf_text | ai_document
+    local_total_milliunits = Column(BigInteger, nullable=True)
+    subject = Column(String, nullable=False, default="")
+    sender = Column(String, nullable=False, default="")
+    message_date = Column(String, nullable=True)
+    text_excerpt = Column(Text, nullable=False, default="")       # bounded, local only
+    error = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    sources = relationship("ReceiptSource", cascade="all, delete-orphan", back_populates="receipt")
+    matches = relationship("ReceiptMatch", cascade="all, delete-orphan", back_populates="receipt")
+
+
+class ReceiptSource(Base):
+    """One sighting of a receipt in a mailbox folder (the same receipt may arrive in both mailboxes)."""
+    __tablename__ = 'receipt_sources'
+    __table_args__ = (UniqueConstraint('mailbox', 'folder', 'uidvalidity', 'uid', name='uq_receipt_source_uid'),)
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    receipt_id = Column(String, ForeignKey('receipts.id'), nullable=False, index=True)
+    mailbox = Column(String, nullable=False)
+    folder = Column(String, nullable=False)
+    uidvalidity = Column(BigInteger, nullable=False, default=0)
+    uid = Column(BigInteger, nullable=False)
+    message_id = Column(String, nullable=False, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    receipt = relationship("Receipt", back_populates="sources")
+
+
+class ReceiptMatch(Base):
+    """A proposed, linked or rejected pairing of a receipt with an import row; never changes bank values."""
+    __tablename__ = 'receipt_matches'
+    __table_args__ = (UniqueConstraint('receipt_id', 'import_row_id', name='uq_receipt_match'),)
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    receipt_id = Column(String, ForeignKey('receipts.id'), nullable=False, index=True)
+    import_row_id = Column(String, ForeignKey('import_rows.id'), nullable=False, index=True)
+    score = Column(Float, nullable=False, default=0.0)
+    signals_json = Column(Text, nullable=False, default="{}")
+    state = Column(String, nullable=False, default="proposed")  # proposed | linked | rejected
+    origin = Column(String, nullable=False, default="auto")     # auto | user
+    role = Column(String, nullable=False, default="primary")    # primary | supporting (shipping/payment notices)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    receipt = relationship("Receipt", back_populates="matches")
+    row = relationship("ImportRow", back_populates="receipt_matches")
+
+
+class AIUsage(Base):
+    """Tokens and estimated cost of every AI request, for the monthly budget."""
+    __tablename__ = 'ai_usage'
+
+    id = Column(String, primary_key=True, default=generate_uuid)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    purpose = Column(String, nullable=False)       # categorize | extract
+    model = Column(String, nullable=False)
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cache_read_tokens = Column(Integer, nullable=False, default=0)
+    cache_write_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd = Column(Float, nullable=False, default=0.0)
+    status = Column(String, nullable=False)        # ok | refused | error
+    detail = Column(String, nullable=False, default="")  # e.g. whether refusal fallbacks were active
 
 
 class ModelVersion(Base):
