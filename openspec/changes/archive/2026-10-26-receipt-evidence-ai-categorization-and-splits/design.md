@@ -102,7 +102,7 @@ The system prompt says the input blocks are untrusted data and the task is only 
 | Field | Type |
 |---|---|
 | `payee` | string |
-| `category_id` | enum of allowed IDs, or null |
+| `category_id` | string (an ID from the allowed list in the prompt), or null. Not a schema enum: with a real plan's ~300 categories the API rejects the schema as too complex to compile; the server-side check below enforces the allowed set |
 | `splits` | list of `{category_id, amount_milliunits, memo}` |
 | `evidence` | list of `{kind: receipt\|history\|rule\|bank, ref}` |
 | `explanation` | ≤ 300 chars |
