@@ -11,6 +11,7 @@ import ResolutionPanel from './components/ResolutionPanel';
 import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
 import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
+import AskAIButton from './components/AskAIButton';
 import SettingsPage from './components/SettingsPage';
 import MetricsDashboard from './components/MetricsDashboard';
 import LoginPage from './components/LoginPage';
@@ -294,6 +295,20 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
     }
   }, [selectedPlanId, reclassifyRows]);
 
+  /* ---- Reload rows after server-side changes (e.g. receipts matched by a fetch) ---- */
+  const refreshActiveRows = useCallback(async () => {
+    if (!selectedPlanId || !batchId) return;
+    try {
+      const active = await fetchActiveBatch(selectedPlanId);
+      if (active.batch_id === batchId) {
+        setPredictions(active.rows);
+        setReviewRows(toReviewedRows(active.rows));
+      }
+    } catch {
+      // no active batch any more: nothing to refresh
+    }
+  }, [selectedPlanId, batchId]);
+
   /* ---- Reconciliation / repayment resolution ---- */
   const replaceRows = (rows: ImportRowData[]) => {
     setPredictions(rows);
@@ -557,7 +572,10 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
           <section className="animate-in">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <h2>Review Transactions</h2>
-              {discardControl}
+              <span style={{ display: 'inline-flex', gap: 12, alignItems: 'center' }}>
+                <AskAIButton batchId={batchId} rows={reviewRows} onDone={(res) => replaceRows(res.rows)} />
+                {discardControl}
+              </span>
             </div>
             {batchContext && (
               <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginBottom: 12 }}>
@@ -603,6 +621,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
               categoryGroups={categoryGroups}
               payees={payees}
               onUpdateRow={handleUpdateRow}
+              onRowReplaced={mergeUpdatedRow}
               onBulkAction={handleBulkAction}
               onCreateRule={handleCreateRule}
               changedRows={changedRows}
@@ -751,7 +770,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
 
         {/* SETTINGS */}
         {view === 'settings' && (
-          <SettingsPage planId={selectedPlanId} onRuleChanged={reclassifyRows} />
+          <SettingsPage planId={selectedPlanId} onRuleChanged={reclassifyRows} onReceiptsFetched={refreshActiveRows} />
         )}
 
         {/* DASHBOARD */}

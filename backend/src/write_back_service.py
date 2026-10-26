@@ -15,6 +15,7 @@ the record ``reconcile_required``; the next push checks YNAB history before
 resending the same import ID.
 """
 
+import json
 import logging
 import uuid
 from collections import Counter
@@ -29,6 +30,7 @@ from sqlalchemy.orm import Session
 from src.models import Account, Category, CategoryGroup, ImportRow, Payee, Plan, SourceRecord
 from src.categories import CategoryDirectory
 from src.money import milliunits_to_units
+from src.splits import SplitError, row_lines, split_views, validate_row
 from src.reconciliation import (
     COMPLETED, block_reason, reconcile_rows, refresh_history, transfer_payee_for,
 )
@@ -160,7 +162,8 @@ class WriteBackService:
                 wr.error = "A write for this source row is already in progress or needs reconciliation."
                 continue
             row.sent_payee, row.sent_category = (ov.payee_name or None), (ov.category_name or None)
-            row.sent_category_id = self._category_id(plan, row, ov)
+            row.sent_category_id = None if row.splits else self._category_id(plan, row, ov)
+            row.sent_splits_json = json.dumps(split_views(row)) if row.splits else None
             payloads.append((wr, row, self._build_payload(plan, row, ov)))
         self._persist_blocked(sendable)
         self.db.commit()
@@ -207,6 +210,12 @@ class WriteBackService:
         if reason:
             wr.status = "dry_run_error" if dry else "unresolved"
             wr.error = reason if not fresh_msg or row.reconciliation_state != "unverified" else fresh_msg
+            return
+        if row.splits:
+            try:
+                validate_row(row, self._categories(plan))   # categories may have been deleted since saving
+            except SplitError as error:
+                return self._fail(wr, f"Split: {error}", dry)
             return
         if row.transfer_state == "resolved":
             source = self.db.get(Account, row.transfer_account_id) if row.transfer_account_id else None
@@ -257,6 +266,10 @@ class WriteBackService:
             payload["payee_id"] = payee_id
         else:
             payload["payee_name"] = ov.payee_name
+        if row.splits:
+            payload["category_id"] = None           # a split parent has no category of its own
+            payload["subtransactions"] = [self._subtransaction(plan, line) for line in row_lines(row)]
+            return payload
         # Explicit null stops YNAB auto-assigning a category from payee history
         category_id = self._category_id(plan, row, ov)
         if category_id:
@@ -264,6 +277,15 @@ class WriteBackService:
         else:
             payload["category_id"] = self._resolve_category_id(plan.id, ov.category_name)  # legacy rows
         return payload
+
+    def _subtransaction(self, plan: Plan, line) -> dict:
+        sub = {"amount": int(line.amount_milliunits), "category_id": self._categories(plan).ynab_id(line.category_id)}
+        if line.memo:
+            sub["memo"] = line.memo[:YNAB_MEMO_LIMIT]
+        if line.payee:
+            payee_id = self._resolve_payee_id(plan.id, line.payee)
+            sub["payee_id" if payee_id else "payee_name"] = payee_id or line.payee
+        return sub
 
     def _categories(self, plan: Plan) -> CategoryDirectory:
         if getattr(self, "_directory_plan", None) != plan.id:

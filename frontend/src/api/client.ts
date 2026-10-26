@@ -1,6 +1,7 @@
 /** API client — uses Vite proxy in dev, direct URL in production */
 
 import { supabase } from '../lib/supabase';
+import type { SplitLineData } from '../lib/splits';
 
 const BASE = (import.meta.env.VITE_API_URL || '/api').replace(/\/+$/, '');
 
@@ -83,6 +84,53 @@ export interface ImportRowData extends PredictionRow {
   reconciliation_note?: string;
   write_state?: WriteState;
   write_error?: string;
+  splits?: SplitLineData[];
+  receipts?: ReceiptView[];
+  ai?: AIView;
+  alternatives?: Record<'payee' | 'category', Alternative[]>;
+}
+
+export type AIStatus = 'none' | 'suggested' | 'invalid' | 'refused' | 'error' | 'skipped_budget';
+
+export interface AIView {
+  status: AIStatus;
+  payee: string | null;
+  category_id: string | null;
+  splits: SplitLineData[];
+  explanation: string | null;
+  uncertainty: 'low' | 'medium' | 'high' | null;
+  evidence: { kind: string; ref: string }[];
+  model: string | null;
+  requested_at: string | null;
+}
+
+export interface Alternative {
+  source: string;
+  value: string | null;
+  category_id: string | null;
+  confidence: number;
+  explanation: string;
+}
+
+export interface ReceiptItem { description: string; quantity: number; amount_milliunits: number }
+
+export interface ReceiptView {
+  receipt_id: string;
+  state: 'proposed' | 'linked' | 'rejected';
+  origin: 'auto' | 'user';
+  role: 'primary' | 'supporting';
+  score: number;
+  signals: Record<string, number>;
+  merchant: string;
+  kind: 'purchase' | 'refund' | 'shipping' | 'payment';
+  reference: string;
+  purchase_date: string | null;
+  total_milliunits: number | null;
+  currency: string;
+  status: string;
+  items: ReceiptItem[];
+  mailboxes: string[];
+  split_suggestion: SplitLineData[];
 }
 
 export interface ImportReport {
@@ -271,6 +319,17 @@ export const resolveRow = (rowId: string, action: ResolveAction, ynabTransaction
     body: JSON.stringify({ action, ynab_transaction_id: ynabTransactionId }),
   });
 
+export const decideReceipt = (rowId: string, receiptId: string, action: 'link' | 'unlink' | 'reject') =>
+  request<ImportRowData>(`/import-rows/${rowId}/receipts`, {
+    method: 'POST', body: JSON.stringify({ receipt_id: receiptId, action }),
+  });
+
+export const saveSplits = (rowId: string, lines: SplitLineData[]) =>
+  request<ImportRowData>(`/import-rows/${rowId}/splits`, { method: 'PUT', body: JSON.stringify({ lines }) });
+
+export const clearSplits = (rowId: string) =>
+  request<ImportRowData>(`/import-rows/${rowId}/splits`, { method: 'DELETE' });
+
 export interface LinkCandidate {
   ynab_transaction_id: string;
   date: string;
@@ -428,6 +487,59 @@ export function updateRule(ruleId: string, rule: {
 export function deleteRule(ruleId: string) {
   return request<{ status: string }>(`/rules/${ruleId}`, { method: 'DELETE' });
 }
+
+/* ---- Optional features: receipts and AI ---- */
+export interface FeatureState { enabled: boolean; reason: string; model?: string; monthly_budget_usd?: number }
+export const fetchFeatures = () => request<{ receipts: FeatureState; ai: FeatureState }>('/features');
+
+export interface MailboxFolderStatus { folder: string; last_fetch_at: string | null; last_uid: number; error: string }
+export interface MailboxStatus { mailbox: string; complete: boolean; folders: MailboxFolderStatus[]; messages_seen: number }
+export interface ReceiptStatus {
+  feature: FeatureState;
+  mailboxes: MailboxStatus[];
+  receipts: Record<string, number>;
+  running: boolean;
+}
+export interface ReceiptFetchResult {
+  messages: number;
+  new_receipts: number;
+  duplicates: number;
+  not_receipts: number;
+  ai_note: string;
+  folders: { mailbox: string; folder: string; error: string }[];
+}
+
+export const fetchReceiptStatus = () => request<ReceiptStatus>('/receipts/status');
+export const runReceiptFetch = () =>
+  request<ReceiptFetchResult>('/receipts/fetch', { method: 'POST', signal: AbortSignal.timeout(15 * 60_000) });
+
+export interface AIUsageSummary {
+  month_start: string;
+  spent_usd: number;
+  budget_usd: number;
+  remaining_usd: number;
+  requests: Record<string, number>;
+  estimate_per_request_usd: number;
+  model: string;
+  feature: FeatureState;
+}
+
+export const fetchAIUsage = () => request<AIUsageSummary>('/ai/usage');
+
+export interface AISuggestResult extends ActiveBatchResponse {
+  requested: number;
+  suggested?: number;
+  invalid?: number;
+  refused?: number;
+  error?: number;
+  skipped_budget?: number;
+  usage: Omit<AIUsageSummary, 'feature'>;
+}
+
+export const aiSuggestBatch = (batchId: string, rowIds?: string[]) =>
+  request<AISuggestResult>(`/import-batches/${batchId}/ai-suggest`, {
+    method: 'POST', body: JSON.stringify({ row_ids: rowIds ?? null }), signal: AbortSignal.timeout(15 * 60_000),
+  });
 
 /* ---- Health ---- */
 export const healthCheck = () => request<{ status: string }>('/health');

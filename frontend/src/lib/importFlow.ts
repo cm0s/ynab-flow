@@ -47,3 +47,33 @@ export const SOURCE_LABELS: Record<string, string> = {
   generic: 'Generic CSV',
   legacy: 'Earlier import',
 };
+
+/** Rows the AI may still help with: not settled by the user, a rule or confident history (mirrors the server). */
+export interface AIRowFields {
+  status: string;
+  transfer_state?: string;
+  amount_milliunits?: number | null;
+  flag_ignore?: boolean;
+  payee: string | null;
+  category: string | null;
+  payee_source?: string;
+  category_source?: string;
+  payee_confidence?: number;
+  category_confidence?: number;
+  editedPayee: string;
+  editedCategory: string;
+}
+
+function locked(source: string | undefined, confidence: number | undefined, edited: boolean): boolean {
+  if (edited || source === 'rule') return true;
+  return (source === 'exact_history' || source === 'fuzzy_history') && (confidence ?? 0) >= 0.95;
+}
+
+export function aiEligible(row: AIRowFields): boolean {
+  if (row.status === 'ignored' || row.flag_ignore || (row.transfer_state ?? 'none') !== 'none' || row.amount_milliunits == null) {
+    return false;
+  }
+  const payeeLocked = locked(row.payee_source, row.payee_confidence, row.editedPayee !== (row.payee ?? ''));
+  const categoryLocked = locked(row.category_source, row.category_confidence, row.editedCategory !== (row.category ?? ''));
+  return !(payeeLocked && categoryLocked);
+}

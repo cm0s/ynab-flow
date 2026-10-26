@@ -27,12 +27,17 @@ from src.reconciliation import (
 from src.models import Plan, Account, CategoryGroup, Category, Payee, Rule, Transaction, ImportBatch, ImportRow, SourceRecord, SourceExport
 from src.auth import verify_token, validate_auth_config
 from src.categories import CategoryDirectory
-from src import model_registry
+from src import model_registry, settings
+from src.splits import SplitError, SplitLine, clear_splits, set_splits, split_views
+from src.receipts.matching import decide as decide_receipt, match_active_batches, match_batches, receipt_views
+from src.precedence import TARGETS, alternatives as row_alternatives, apply_precedence, user_edited
 
 validate_auth_config()
 
 app = FastAPI(title="YNAB Flow API")
 training_lock = Lock()
+receipt_fetch_lock = Lock()
+app.state.ai_transport = None   # tests and the local fake stack inject a fake Claude transport here
 
 # CORS — allow frontend origins
 allowed_origins = [origin.strip() for origin in os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if origin.strip()]
@@ -80,6 +85,60 @@ def get_ynab_client():
 @app.get("/health")
 def health_check():
     return {"status": "ok"}
+
+
+@app.get("/features")
+def get_features(_user: str = Depends(verify_token)):
+    """Which optional features (receipts, AI) are on, and why not. Never includes secret values."""
+    return settings.features()
+
+
+def _ai_client(db: Session, s: "settings.Settings"):
+    """An AI client, or None when AI is off (no key and no injected transport)."""
+    from src.ai.client import AIClient, AIDisabled
+    try:
+        return AIClient(db, s, app.state.ai_transport)
+    except AIDisabled:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Receipts from Proton Mail Bridge (read-only)
+# ---------------------------------------------------------------------------
+
+def _receipt_counts(db: Session) -> dict:
+    from sqlalchemy import func
+    from src.models import Receipt
+    return {status: count for status, count in db.query(Receipt.status, func.count(Receipt.id)).group_by(Receipt.status)}
+
+
+@app.get("/receipts/status")
+def receipts_status(db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Mailbox configuration, per-folder fetch state and errors in plain terms, and receipt counts."""
+    from src.mail.fetch import mailbox_status
+    s = settings.load_settings()
+    return {"feature": settings.receipts_feature(s), "mailboxes": mailbox_status(db, s),
+            "receipts": _receipt_counts(db), "running": receipt_fetch_lock.locked()}
+
+
+@app.post("/receipts/fetch")
+def receipts_fetch(db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Read new messages from every configured mailbox (read-only) and extract receipts."""
+    from src.mail.fetch import fetch_receipts, mailbox_status
+    s = settings.load_settings()
+    feature = settings.receipts_feature(s)
+    if not feature["enabled"]:
+        raise HTTPException(status_code=409, detail=feature["reason"])
+    if not receipt_fetch_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail="A receipt fetch is already running.")
+    try:
+        report = fetch_receipts(db, s, ai=_ai_client(db, s))
+        matches = match_active_batches(db)
+        db.commit()
+    finally:
+        receipt_fetch_lock.release()
+    return {**report.as_dict(), "matches": matches, "mailboxes": mailbox_status(db, s),
+            "receipts": _receipt_counts(db)}
 
 @app.post("/sync/budgets")
 def sync_budgets(
@@ -406,10 +465,24 @@ def _batch_rows_to_dicts(rows: list) -> list:
             "edited_category_id": r.edited_category_id,
             "edited_memo": r.edited_memo,
             "flag_color": r.flag_color,
+            "splits": split_views(r),
+            "receipts": receipt_views(r),
+            "ai": _ai_view(r),
+            "alternatives": row_alternatives(r),
         }
         for r in sorted(rows, key=lambda r: r.row_index)
         if r.write_state not in COMPLETED
     ]
+
+
+def _ai_view(r: ImportRow) -> dict:
+    return {
+        "status": r.ai_status, "payee": r.ai_payee, "category_id": r.ai_category_id,
+        "splits": json.loads(r.ai_splits_json) if r.ai_splits_json else [],
+        "explanation": r.ai_explanation, "uncertainty": r.ai_uncertainty,
+        "evidence": json.loads(r.ai_evidence_json).get("items", []) if r.ai_evidence_json else [],
+        "model": r.ai_model, "requested_at": r.ai_requested_at.isoformat() if r.ai_requested_at else None,
+    }
 
 
 def _batch_payload(db: Session, batch: ImportBatch) -> dict:
@@ -460,6 +533,14 @@ def _apply_predictions(rows: List[ImportRow], results, keep_transfer: bool = Tru
             auto = not d["review_required"] and not d["flag_ignore"] and import_row.transfer_state == "none"
             if not user_edited_payee and not user_edited_category:
                 import_row.status = "accepted" if auto else "pending"
+
+
+def _merge_ai(db: Session, plan_id: str, rows: List[ImportRow]) -> None:
+    """Re-apply evidence precedence so stored AI suggestions and fresh predictions merge the same way."""
+    directory = CategoryDirectory(db, plan_id)
+    for row in rows:
+        if row.ai_status == "suggested" or row.alternatives_json:
+            apply_precedence(row, directory)
 
 
 def _directory_for_row(db: Session, row: ImportRow) -> CategoryDirectory:
@@ -542,6 +623,8 @@ async def upload_csv(
         ))
     db.commit()
     db.refresh(batch)
+    match_batches(db, [batch])          # link receipts fetched earlier; bank values are never touched
+    db.commit()
 
     payload = _batch_payload(db, batch)
     return {**payload, "count": len(payload["rows"]), "predictions": payload["rows"]}
@@ -574,6 +657,7 @@ def reclassify(req: ReclassifyRequest, db: Session = Depends(get_db), _user: str
         account.id if account else "", account.name if account else "",
     )
     _apply_predictions(import_rows, results)
+    _merge_ai(db, req.plan_id, import_rows)
     db.commit()
     payload = _batch_payload(db, batch)
     return {**payload, "count": len(payload["rows"]), "predictions": payload["rows"]}
@@ -800,6 +884,148 @@ def resolve_row(row_id: str, req: RowResolution, db: Session = Depends(get_db), 
     return _row_view(row)
 
 
+class SplitLineIn(BaseModel):
+    amount_milliunits: int
+    category_id: str
+    payee: str = ""
+    memo: str = ""
+    origin: str = "user"
+
+class SplitsRequest(BaseModel):
+    lines: List[SplitLineIn]
+
+@app.put("/import-rows/{row_id}/splits")
+def put_splits(row_id: str, req: SplitsRequest, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Replace a row's split lines; they must sum exactly to the bank amount."""
+    row = _owned_row(db, row_id)
+    if row.write_state in COMPLETED:
+        raise HTTPException(status_code=409, detail="This row is already in YNAB.")
+    try:
+        set_splits(db, row, [SplitLine(**line.model_dump()) for line in req.lines], _directory_for_row(db, row))
+    except SplitError as error:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    db.commit()
+    return _row_view(row)
+
+
+@app.delete("/import-rows/{row_id}/splits")
+def delete_splits(row_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Clear the split so the row returns to a single category."""
+    row = _owned_row(db, row_id)
+    if row.write_state in COMPLETED:
+        raise HTTPException(status_code=409, detail="This row is already in YNAB.")
+    clear_splits(row)
+    db.commit()
+    return _row_view(row)
+
+
+def _ai_locked(row: ImportRow, target: str) -> bool:
+    """Targets the AI may not replace: user edits, rules and confident history."""
+    source = getattr(row, f"{target}_source")
+    if user_edited(row, target) or source == "rule":
+        return True
+    return source in ("exact_history", "fuzzy_history") and (getattr(row, f"{target}_confidence") or 0) >= 0.95
+
+
+def _ai_eligible(row: ImportRow) -> bool:
+    return (row.write_state not in COMPLETED and row.status != "ignored" and not row.flag_ignore
+            and row.transfer_state == "none" and row.amount_milliunits is not None
+            and not all(_ai_locked(row, t) for t in TARGETS))
+
+
+def _run_ai(db: Session, plan_id: str, rows: List[ImportRow]) -> dict:
+    """Ask the AI about each row (bounded concurrency); results are stored and merged on this thread."""
+    from concurrent.futures import ThreadPoolExecutor
+    from src.ai.categorize import CategorizationContext, prepare, request_suggestion, store_suggestion
+    from src.ai.client import AIError
+    s = settings.load_settings()
+    ai = _ai_client(db, s)
+    if ai is None:
+        raise HTTPException(status_code=409, detail=settings.ai_feature(s)["reason"])
+    ctx = CategorizationContext(db, plan_id)
+    prepared = [(row, prepare(ctx, row)) for row in rows]
+
+    def work(request):
+        try:
+            return request_suggestion(ai, ctx, request), None
+        except AIError as error:
+            return None, error
+
+    with ThreadPoolExecutor(max_workers=max(1, s.ai_max_concurrency)) as pool:
+        outcomes = list(pool.map(work, [p for _, p in prepared]))
+    counts = {"requested": len(rows), "suggested": 0, "invalid": 0, "refused": 0, "error": 0, "skipped_budget": 0}
+    for (row, _), (suggestion, error) in zip(prepared, outcomes):
+        store_suggestion(row, suggestion, error, s.ai_model)
+        counts[row.ai_status] = counts.get(row.ai_status, 0) + 1
+    _merge_ai(db, plan_id, [row for row, _ in prepared])
+    ai.flush_usage(db)
+    db.commit()
+    return counts
+
+
+class AISuggestRequest(BaseModel):
+    row_ids: Optional[List[str]] = None   # default: every eligible row of the batch
+
+
+@app.post("/import-batches/{batch_id}/ai-suggest")
+def ai_suggest_batch(batch_id: str, req: Optional[AISuggestRequest] = None, db: Session = Depends(get_db),
+                     _user: str = Depends(verify_token)):
+    """AI suggestions for rows that rules, user edits and confident history do not settle. Rows stay pending."""
+    batch = db.query(ImportBatch).filter(ImportBatch.id == batch_id).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    wanted = set(req.row_ids) if req and req.row_ids else None
+    rows = [r for r in sorted(batch.rows, key=lambda r: r.row_index)
+            if _ai_eligible(r) and (wanted is None or r.id in wanted)]
+    counts = _run_ai(db, batch.plan_id, rows) if rows else {"requested": 0}
+    from src.ai.client import usage_summary
+    return {**counts, "usage": usage_summary(db, settings.load_settings()), **_batch_payload(db, batch)}
+
+
+@app.post("/import-rows/{row_id}/ai-suggest")
+def ai_suggest_row(row_id: str, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """AI suggestion for one row."""
+    row = _owned_row(db, row_id)
+    if not _ai_eligible(row):
+        raise HTTPException(status_code=409, detail="Rules, your edits or confident history already settle this row "
+                                                    "(or it is a transfer, ignored or already in YNAB).")
+    _run_ai(db, row.batch.plan_id, [row])
+    db.refresh(row)
+    return _row_view(row)
+
+
+@app.get("/ai/usage")
+def ai_usage(db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Month-to-date AI cost against the budget, and the average cost per request for estimates."""
+    from src.ai.client import usage_summary
+    s = settings.load_settings()
+    return {**usage_summary(db, s), "feature": settings.ai_feature(s)}
+
+
+class ReceiptDecision(BaseModel):
+    receipt_id: str
+    action: str  # link | unlink | reject
+
+@app.post("/import-rows/{row_id}/receipts")
+def decide_row_receipt(row_id: str, req: ReceiptDecision, db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Link, unlink or reject a receipt for a row. Receipts add evidence only; bank values never change."""
+    from src.models import Receipt
+    row = _owned_row(db, row_id)
+    if row.write_state in COMPLETED:
+        raise HTTPException(status_code=409, detail="This row is already in YNAB.")
+    receipt = db.get(Receipt, req.receipt_id)
+    if receipt is None or receipt.status == "not_receipt":
+        raise HTTPException(status_code=404, detail="Receipt not found.")
+    try:
+        decide_receipt(db, row, receipt, req.action)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    db.commit()
+    db.refresh(row)
+    return _row_view(row)
+
+
 class TransferRouting(BaseModel):
     account_id: Optional[str] = None  # local id of the paying account; null keeps the repayment unresolved
 
@@ -864,6 +1090,7 @@ def reassign_account(batch_id: str, req: ReassignRequest, db: Session = Depends(
         if alloc.record.write_state in COMPLETED and alloc.state != "ambiguous":
             row.write_state, row.ynab_transaction_id = alloc.record.write_state, alloc.record.ynab_transaction_id
     _apply_predictions(movable, results, keep_transfer=False)
+    _merge_ai(db, batch.plan_id, movable)
     batch.account_id, batch.account_confirmed = account.id, True
     db.commit()
     return _batch_payload(db, batch)
