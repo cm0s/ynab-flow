@@ -30,6 +30,7 @@ class Settings:
     bridge_cert_path: str = ""
     mailboxes: List[MailboxConfig] = field(default_factory=list)
     folders: List[str] = field(default_factory=lambda: ["INBOX"])
+    fetch_since_days: int = 60                       # only messages that arrived this recently; 0 = no limit
     anthropic_api_key: str = field(default="", repr=False)
     ai_model: str = DEFAULT_AI_MODEL
     ai_extraction_model: str = DEFAULT_AI_MODEL
@@ -86,6 +87,7 @@ def load_settings(env: Optional[dict] = None) -> Settings:
         bridge_cert_path=env.get("BRIDGE_CERT_PATH", "").strip(),
         mailboxes=mailboxes,
         folders=_split(env.get("BRIDGE_FOLDERS", "")) or ["INBOX"],
+        fetch_since_days=_number(env, "BRIDGE_FETCH_SINCE_DAYS", 60, int, errors, minimum=0),
         anthropic_api_key=env.get("ANTHROPIC_API_KEY", "").strip(),
         ai_model=ai_model,
         ai_extraction_model=env.get("AI_EXTRACTION_MODEL", "").strip() or ai_model,
@@ -119,8 +121,11 @@ def receipts_feature(s: Settings) -> dict:
     else:
         return {"enabled": False, "reason": "Bridge is not on this computer: set BRIDGE_CERT_PATH so its "
                                             "certificate can be verified."}
-    return {"enabled": True, "reason": f"{len(s.mailboxes)} mailbox(es) configured. {tls}",
-            "mailboxes": [m.label for m in s.mailboxes], "folders": s.folders}
+    window = (f"Only messages from the last {s.fetch_since_days} days are read." if s.fetch_since_days
+              else "All messages are read (BRIDGE_FETCH_SINCE_DAYS=0).")
+    return {"enabled": True, "reason": f"{len(s.mailboxes)} mailbox(es) configured. {window} {tls}",
+            "mailboxes": [m.label for m in s.mailboxes], "folders": s.folders,
+            "fetch_since_days": s.fetch_since_days}
 
 
 def ai_feature(s: Settings) -> dict:

@@ -20,6 +20,7 @@ from typing import Dict, List, Optional, Set
 class FakeMessage:
     raw: bytes
     flags: Set[str] = field(default_factory=set)
+    received: datetime.date = field(default_factory=datetime.date.today)   # IMAP internal (arrival) date
 
 
 @dataclass
@@ -27,9 +28,9 @@ class FakeFolder:
     uidvalidity: int = 1
     messages: Dict[int, FakeMessage] = field(default_factory=dict)
 
-    def add(self, raw: bytes, uid: Optional[int] = None) -> int:
+    def add(self, raw: bytes, uid: Optional[int] = None, received: Optional[datetime.date] = None) -> int:
         uid = uid or (max(self.messages, default=0) + 1)
-        self.messages[uid] = FakeMessage(raw)
+        self.messages[uid] = FakeMessage(raw, received=received or datetime.date.today())
         return uid
 
 
@@ -176,6 +177,10 @@ class _Session:
             match = re.search(r"UID (\d+):\*", rest)
             low = int(match.group(1)) if match else 1
             found = [u for u in uids if u >= low] or uids[-1:]   # like real servers: n:* includes the highest UID
+            since = re.search(r"SINCE (\d{2}-\w{3}-\d{4})", rest)
+            if since:
+                start = datetime.datetime.strptime(since.group(1), "%d-%b-%Y").date()
+                found = [u for u in found if self.folder.messages[u].received >= start]
             self.send("* SEARCH " + " ".join(map(str, found)))
             self.send(f"{tag} OK SEARCH completed")
         elif sub == "FETCH":

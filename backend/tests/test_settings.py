@@ -49,6 +49,9 @@ def test_remote_bridge_requires_certificate(tmp_path):
 def test_invalid_numbers_are_reported():
     f = features(load_settings({"ANTHROPIC_API_KEY": "k", "AI_MONTHLY_BUDGET_USD": "lots"}))
     assert not f["ai"]["enabled"] and "AI_MONTHLY_BUDGET_USD" in f["ai"]["reason"]
+    f = features(load_settings({"BRIDGE_MAILBOXES": "me", "BRIDGE_ME_USER": "u", "BRIDGE_ME_PASSWORD": "p",
+                                "BRIDGE_FETCH_SINCE_DAYS": "-1"}))
+    assert not f["receipts"]["enabled"] and "BRIDGE_FETCH_SINCE_DAYS" in f["receipts"]["reason"]
 
 
 def test_features_endpoint_never_returns_credentials(env, monkeypatch):

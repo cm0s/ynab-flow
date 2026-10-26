@@ -1,7 +1,8 @@
 """Incremental, read-only receipt fetching from the configured Bridge mailboxes.
 
 Each mailbox folder keeps a cursor (UIDVALIDITY + last UID); only newer UIDs
-are fetched. A receipt is identified by its content hash, so the same receipt
+are fetched, and only messages that arrived within ``fetch_since_days``, so the
+first fetch of a large mailbox does not read years of mail. A receipt is identified by its content hash, so the same receipt
 arriving in both household mailboxes is stored once with two sources, and a
 UIDVALIDITY change rescans the folder without duplicating receipts. The
 mailbox a receipt came from says nothing about who it was for.
@@ -10,7 +11,7 @@ mailbox a receipt came from says nothing about who it was for.
 import imaplib
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -149,9 +150,10 @@ def fetch_receipts(db: Session, settings: Settings, ai: Optional[AIClient] = Non
                 report.folders.append(FolderReport(mailbox.label, folder, error=str(exc)))
             db.commit()
             continue
+        since = date.today() - timedelta(days=settings.fetch_since_days) if settings.fetch_since_days else None
         try:
             for folder in settings.folders:
-                report.folders.append(_fetch_folder(db, fetcher, conn, mailbox.label, folder))
+                report.folders.append(_fetch_folder(db, fetcher, conn, mailbox.label, folder, since))
         finally:
             conn.logout()
     if ai is not None:
@@ -161,14 +163,15 @@ def fetch_receipts(db: Session, settings: Settings, ai: Optional[AIClient] = Non
     return report
 
 
-def _fetch_folder(db: Session, fetcher: _Fetcher, conn: MailConnection, mailbox: str, folder: str) -> FolderReport:
+def _fetch_folder(db: Session, fetcher: _Fetcher, conn: MailConnection, mailbox: str, folder: str,
+                  since: Optional[date] = None) -> FolderReport:
     folder_report = FolderReport(mailbox, folder)
     cursor = _cursor(db, mailbox, folder)
     try:
         uidvalidity = conn.examine(folder)
         if cursor.uidvalidity != uidvalidity:
             cursor.uidvalidity, cursor.last_uid = uidvalidity, 0
-        for uid in conn.uids_after(cursor.last_uid):
+        for uid in conn.uids_after(cursor.last_uid, since):
             fetcher.ingest(conn.fetch(uid), mailbox, folder, uidvalidity, uid, folder_report)
             folder_report.messages += 1
             cursor.last_uid = uid
