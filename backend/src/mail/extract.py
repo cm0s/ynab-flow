@@ -10,6 +10,7 @@ import email
 import email.policy
 import hashlib
 import io
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -129,6 +130,10 @@ def html_to_text(html: str) -> str:
 def normalize_whitespace(text: str) -> str:
     lines = [re.sub(r"[ \t ]+", " ", line).strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
+
+
+# pypdf warns about every font it cannot fully decode (with the font table attached); the text is still read
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 
 def pdf_text(data: bytes) -> str:
