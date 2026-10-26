@@ -33,7 +33,7 @@ export default function MailboxSettings({ onFetched }: { onFetched?: () => void 
       {status.isError && (
         <p style={{ color: 'var(--danger)', fontSize: '0.85rem' }}>{(status.error as Error).message}</p>
       )}
-      {data && !data.feature.enabled && (
+      {data && (
         <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: 12 }}>{data.feature.reason}</p>
       )}
       {data && data.mailboxes.length > 0 && (

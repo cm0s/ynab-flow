@@ -1,5 +1,5 @@
 """Fetching receipts from a fake Bridge: cursors, deduplication across mailboxes, UIDVALIDITY, AI extraction."""
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine
@@ -130,3 +130,21 @@ def test_unreachable_bridge_is_reported_per_folder(db):
     report = fetch_receipts(db, s).as_dict()
     assert "Is Bridge running" in report["folders"][0]["error"]
     assert "Is Bridge running" in mailbox_status(db, s)[0]["folders"][0]["error"]
+
+
+def test_only_recent_messages_are_read(db, tmp_path):
+    inbox = FakeFolder()
+    old = inbox.add(fx.html_order(message_id="<old@x>"), received=date.today() - timedelta(days=90))
+    inbox.add(fx.pdf_invoice(), received=date.today() - timedelta(days=5))
+    with FakeImapServer(tmp_path, {"me@proton.me": FakeAccount("p1", {"INBOX": inbox})}) as server:
+        s = settings_for(server, BRIDGE_MAILBOXES="me", ANTHROPIC_API_KEY="")
+        assert s.fetch_since_days == 60                       # the default
+        assert fetch_receipts(db, s).as_dict()["messages"] == 1
+        assert any(" SINCE " in c for c in server.commands)
+        # A later fetch keeps the window and the cursor: the old message is still not read
+        assert fetch_receipts(db, s).as_dict()["messages"] == 0
+        # 0 lifts the limit for a deliberate full read; the cursor is reset to reach older UIDs
+        db.query(MailboxCursor).delete()
+        everything = settings_for(server, BRIDGE_MAILBOXES="me", ANTHROPIC_API_KEY="", BRIDGE_FETCH_SINCE_DAYS="0")
+        assert fetch_receipts(db, everything).as_dict()["messages"] == 2
+    assert db.query(ReceiptSource).filter_by(uid=old).count() == 1

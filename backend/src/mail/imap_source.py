@@ -10,7 +10,8 @@ error messages.
 import imaplib
 import socket
 import ssl
-from typing import List, Protocol
+from datetime import date
+from typing import List, Optional, Protocol
 
 from src.settings import MailboxConfig, Settings
 
@@ -18,6 +19,7 @@ ALLOWED_COMMANDS = {"CAPABILITY", "STARTTLS", "LOGIN", "EXAMINE", "UID", "LOGOUT
 ALLOWED_UID_COMMANDS = {"SEARCH", "FETCH"}
 FETCH_ITEMS = "(BODY.PEEK[])"
 TIMEOUT_SECONDS = 30
+IMAP_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
 class ForbiddenImapCommand(RuntimeError):
@@ -32,7 +34,7 @@ class MailConnection(Protocol):
     """The read-only operations the fetcher needs; implemented by ``ImapConnection`` and test fakes."""
 
     def examine(self, folder: str) -> int: ...          # returns UIDVALIDITY
-    def uids_after(self, last_uid: int) -> List[int]: ...
+    def uids_after(self, last_uid: int, since: Optional[date] = None) -> List[int]: ...
     def fetch(self, uid: int) -> bytes: ...
     def logout(self) -> None: ...
 
@@ -110,8 +112,11 @@ class ImapConnection:
         except (TypeError, ValueError, IndexError) as exc:
             raise MailError(f"Bridge did not report UIDVALIDITY for '{folder}'.") from exc
 
-    def uids_after(self, last_uid: int) -> List[int]:
-        status, data = self._imap.uid("SEARCH", None, f"UID {int(last_uid) + 1}:*")
+    def uids_after(self, last_uid: int, since: Optional[date] = None) -> List[int]:
+        criteria = f"UID {int(last_uid) + 1}:*"
+        if since is not None:                              # arrival date, in IMAP's English date format
+            criteria += f" SINCE {since.day:02d}-{IMAP_MONTHS[since.month - 1]}-{since.year}"
+        status, data = self._imap.uid("SEARCH", None, criteria)
         if status != "OK":
             raise MailError("Bridge could not list messages.")
         uids = [int(u) for u in (data[0] or b"").split()]

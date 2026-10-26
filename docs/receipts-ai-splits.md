@@ -81,6 +81,10 @@ computer as the backend. Access is strictly read-only:
 
    `BRIDGE_FOLDERS` is a comma-separated list of folders or labels to read,
    for example `INBOX,Receipts` (Proton labels appear as `Labels/<name>`).
+   `BRIDGE_FETCH_SINCE_DAYS` (default `60`) limits every fetch to messages
+   that arrived in the last N days, so the first fetch of a large mailbox
+   does not download years of mail (and, with AI on, send every old receipt
+   to Claude). `0` removes the limit.
 5. Restart the backend and use **Settings → Receipts from Proton Mail →
    Fetch receipts**. The section shows each mailbox's last fetch and any
    error in plain terms (Bridge not running, login rejected, unknown folder).
@@ -88,7 +92,9 @@ computer as the backend. Access is strictly read-only:
 ### What a fetch does
 
 - Each mailbox folder keeps a cursor; only messages newer than the last one
-  read are fetched. If Bridge resets a folder (UIDVALIDITY change), it is
+  read, and that arrived within `BRIDGE_FETCH_SINCE_DAYS`, are fetched.
+  Messages older than the window are skipped for good unless you raise the
+  window and the folder's cursor is reset. If Bridge resets a folder (UIDVALIDITY change), it is
   read again without creating duplicates.
 - A receipt is identified by its content, so the same receipt in both
   mailboxes is stored once with both sources. The mailbox does not imply who
