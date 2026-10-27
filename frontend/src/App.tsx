@@ -10,7 +10,8 @@ import { handledRowIds, removeHandled, canCompleteBatch, describeImport, SOURCE_
 import ResolutionPanel from './components/ResolutionPanel';
 import FileDrop from './components/FileDrop';
 import StatsBar from './components/StatsBar';
-import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
+import ReviewTable, { type ReviewedRow, type ReviewStatus } from './components/ReviewTable';
+import { toReviewedRows } from './lib/reviewRows';
 import AskAIButton from './components/AskAIButton';
 import SettingsPage from './components/SettingsPage';
 import MetricsDashboard from './components/MetricsDashboard';
@@ -808,11 +809,8 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(!!supabase);
 
   useEffect(() => {
-    if (!supabase) {
-      // No Supabase configured (local dev) — skip auth
-      setAuthLoading(false);
-      return;
-    }
+    // No Supabase configured (local dev): skip auth; authLoading already starts false
+    if (!supabase) return;
 
     supabase.auth.getSession().then(({ data: { session: s } }) => {
       setSession(s);
