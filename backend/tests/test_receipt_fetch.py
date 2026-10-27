@@ -7,7 +7,8 @@ from sqlalchemy.orm import sessionmaker
 
 from src.ai.client import AIClient
 from src.ai.extract import ReceiptItemOut, ReceiptOut
-from src.mail.fetch import fetch_receipts, mailbox_status
+from src.mail.fetch import fetch_message, fetch_receipts, mailbox_status
+from src.mail.imap_source import MailError
 from src.models import AIUsage, Base, MailboxCursor, Receipt, ReceiptSource
 from src.settings import load_settings
 from tests import mail_fixtures as fx
@@ -148,3 +149,22 @@ def test_only_recent_messages_are_read(db, tmp_path):
         everything = settings_for(server, BRIDGE_MAILBOXES="me", ANTHROPIC_API_KEY="", BRIDGE_FETCH_SINCE_DAYS="0")
         assert fetch_receipts(db, everything).as_dict()["messages"] == 2
     assert db.query(ReceiptSource).filter_by(uid=old).count() == 1
+
+
+def test_one_message_is_read_again_read_only_with_message_id_fallback(db, tmp_path):
+    inbox = FakeFolder(uidvalidity=5)
+    inbox.add(fx.newsletter())
+    with FakeImapServer(tmp_path, {"me@proton.me": FakeAccount("p1", {"INBOX": inbox})}) as server:
+        s = settings_for(server, BRIDGE_MAILBOXES="me", ANTHROPIC_API_KEY="")
+        fetch_receipts(db, s)
+        skipped = db.query(Receipt).one()
+        assert b"Autumn ideas" in fetch_message(s, skipped)                 # by UID
+        inbox.uidvalidity = 6                                               # Bridge renumbered the folder
+        inbox.messages = {41: inbox.messages[1]}
+        assert b"Autumn ideas" in fetch_message(s, skipped)                 # by Message-ID
+        assert (skipped.sources[0].uidvalidity, skipped.sources[0].uid) == (6, 41)
+        inbox.messages = {}
+        with pytest.raises(MailError, match="no longer in the mailbox"):
+            fetch_message(s, skipped)
+        assert set(server.verbs()) <= {"CAPABILITY", "STARTTLS", "LOGIN", "EXAMINE", "UID SEARCH", "UID FETCH", "LOGOUT"}
+    assert all(not m.flags for m in inbox.messages.values())

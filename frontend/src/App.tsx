@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { useQuery, useMutation, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   Workflow, RefreshCw, Loader2, ArrowLeft, Download, Upload as UploadIcon,
-  CheckCircle, AlertCircle, XCircle, Settings, BarChart3, LogOut, Trash2,
+  CheckCircle, AlertCircle, XCircle, Settings, BarChart3, LogOut, Trash2, Receipt,
 } from 'lucide-react';
 import { fetchPlans, uploadCSV, syncBudgets, syncPlanData, fetchAccounts, fetchCategories, fetchPayees, writeBack, createRule, reclassify, fetchActiveBatch, updateImportRows, completeBatch, discardBatch, reconcileBatch, resolveRow, routeTransfer, reassignAccount } from './api/client';
 import type { Plan, ImportRowData, Account, CategoryGroup, PayeeItem, WriteBackResponse, BatchContext, ResolveAction } from './api/client';
@@ -14,13 +14,14 @@ import ReviewTable, { toReviewedRows, type ReviewedRow, type ReviewStatus } from
 import AskAIButton from './components/AskAIButton';
 import SettingsPage from './components/SettingsPage';
 import MetricsDashboard from './components/MetricsDashboard';
+import ReceiptsPage from './components/ReceiptsPage';
 import LoginPage from './components/LoginPage';
 import { supabase } from './lib/supabase';
 import type { Session } from '@supabase/supabase-js';
 
 const queryClient = new QueryClient();
 
-type View = 'import' | 'review' | 'push' | 'settings' | 'dashboard';
+type View = 'import' | 'review' | 'push' | 'settings' | 'dashboard' | 'receipts';
 
 function AppContent({ onLogout }: { onLogout?: () => void }) {
   const [selectedPlanId, setSelectedPlanId] = useState<string>('');
@@ -28,6 +29,11 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
   const [predictions, setPredictions] = useState<ImportRowData[]>([]);
   const [reviewRows, setReviewRows] = useState<ReviewedRow[]>([]);
   const [view, setView] = useState<View>('import');
+  const [openReceiptId, setOpenReceiptId] = useState<string | null>(null);
+  const showReceipt = useCallback((id: string) => {
+    setOpenReceiptId(id);
+    setView('receipts');
+  }, []);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [writeMode, setWriteMode] = useState<string>('dry_run');
   const [writeResult, setWriteResult] = useState<WriteBackResponse | null>(null);
@@ -397,6 +403,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
     else if (view === 'review') setView('import');
     else if (view === 'settings') setView('import');
     else if (view === 'dashboard') setView('import');
+    else if (view === 'receipts') setView(reviewRows.length > 0 ? 'review' : 'import');
   };
 
   return (
@@ -448,6 +455,13 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
               <RefreshCw size={16} />
             )}
             Sync
+          </button>
+          <button
+            className={`btn ${view === 'receipts' ? 'btn-primary' : 'btn-ghost'}`}
+            onClick={() => { setOpenReceiptId(null); setView(view === 'receipts' ? 'import' : 'receipts'); }}
+            title="Receipts and spending"
+          >
+            <Receipt size={18} />
           </button>
           <button
             className={`btn ${view === 'dashboard' ? 'btn-primary' : 'btn-ghost'}`}
@@ -622,6 +636,7 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
               payees={payees}
               onUpdateRow={handleUpdateRow}
               onRowReplaced={mergeUpdatedRow}
+              onOpenReceipt={showReceipt}
               onBulkAction={handleBulkAction}
               onCreateRule={handleCreateRule}
               changedRows={changedRows}
@@ -776,6 +791,12 @@ function AppContent({ onLogout }: { onLogout?: () => void }) {
         {/* DASHBOARD */}
         {view === 'dashboard' && (
           <MetricsDashboard planId={selectedPlanId} />
+        )}
+
+        {/* RECEIPTS AND SPENDING */}
+        {view === 'receipts' && (
+          <ReceiptsPage key={openReceiptId ?? 'receipts'} planId={selectedPlanId} categoryGroups={categoryGroups}
+            openReceiptId={openReceiptId} />
         )}
       </main>
     </div>

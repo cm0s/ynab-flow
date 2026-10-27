@@ -1,4 +1,5 @@
 """Migration tests on disposable SQLite databases (no live data touched)."""
+import json
 from pathlib import Path
 
 import pytest
@@ -128,3 +129,28 @@ def test_receipts_ai_splits_upgrade_and_downgrade(tmp_path, monkeypatch):
     assert "ai_status" not in {c["name"] for c in insp.get_columns("import_rows")}
     with sa.create_engine(url).connect() as c:
         assert c.execute(sa.text("SELECT count(*) FROM import_rows")).scalar() == 1
+
+
+def test_receipt_review_backfills_extracted_snapshot(tmp_path, monkeypatch):
+    url = f"sqlite:///{tmp_path / 'review.db'}"
+    cfg = _config(url, monkeypatch)
+    command.upgrade(cfg, "c3d4e5f6a7b8")
+    engine = sa.create_engine(url)
+    with engine.begin() as c:
+        c.execute(sa.text(
+            "INSERT INTO receipts (id, content_hash, status, kind, merchant, reference, purchase_date, total_milliunits,"
+            " currency, items_json, card_hint, extraction_method, subject, sender, text_excerpt, error)"
+            " VALUES ('rc','h','extracted','purchase','Migros','A1','2026-10-03',84900,'CHF',"
+            " '[{\"description\": \"Milk\", \"quantity\": 1, \"amount_milliunits\": 84900}]','','text','s','x','','')"))
+    command.upgrade(cfg, "head")
+    with engine.connect() as c:
+        row = c.execute(sa.text("SELECT extracted_json, user_fields_json, excluded FROM receipts")).one()
+    snapshot = json.loads(row[0])
+    assert snapshot["merchant"] == "Migros" and snapshot["total_milliunits"] == 84900 and snapshot["status"] == "extracted"
+    assert snapshot["items"][0]["description"] == "Milk" and row[1] == "[]" and not row[2]
+    command.downgrade(cfg, "c3d4e5f6a7b8")
+    cols = {c["name"] for c in sa.inspect(sa.create_engine(url)).get_columns("receipts")}
+    assert "extracted_json" not in cols and "merchant" in cols
+    command.upgrade(cfg, "head")
+    with sa.create_engine(url).connect() as c:
+        assert json.loads(c.execute(sa.text("SELECT extracted_json FROM receipts")).scalar())["merchant"] == "Migros"

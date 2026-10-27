@@ -204,6 +204,7 @@ interface Props {
   onCreateRule?: (row: ReviewedRow) => void;
   changedRows?: Set<number>;
   onRowReplaced?: (row: ImportRowData) => void;
+  onOpenReceipt?: (receiptId: string) => void;
   splitSuggestions?: (row: ReviewedRow) => SplitSuggestion[];
 }
 
@@ -211,7 +212,7 @@ type SortKey = 'date' | 'memo' | 'amount' | 'payee' | 'category' | 'source_categ
 type SortDir = 'asc' | 'desc';
 type EditableField = 'memo' | 'payee' | 'category';
 
-export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow, onBulkAction, onCreateRule, changedRows, onRowReplaced, splitSuggestions }: Props) {
+export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow, onBulkAction, onCreateRule, changedRows, onRowReplaced, onOpenReceipt, splitSuggestions }: Props) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -521,7 +522,7 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
                     ) : (
                       <span>
                         {displayMemo}
-                        {onRowReplaced && <ReceiptBadge row={row} onRowReplaced={onRowReplaced} />}
+                        {onRowReplaced && <ReceiptBadge row={row} onRowReplaced={onRowReplaced} onOpenReceipt={onOpenReceipt} />}
                       </span>
                     )}
                   </td>

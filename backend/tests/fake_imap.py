@@ -7,6 +7,7 @@ are applied to the in-memory messages, so tests can prove they never happen.
 """
 
 import datetime
+import email
 import re
 import socketserver
 import ssl
@@ -176,7 +177,13 @@ class _Session:
         if sub == "SEARCH":
             match = re.search(r"UID (\d+):\*", rest)
             low = int(match.group(1)) if match else 1
-            found = [u for u in uids if u >= low] or uids[-1:]   # like real servers: n:* includes the highest UID
+            found = [u for u in uids if u >= low]
+            if match:
+                found = found or uids[-1:]                          # like real servers: n:* includes the highest UID
+            header = re.search(r'HEADER Message-ID "([^"]*)"', rest, re.I)
+            if header:
+                found = [u for u in found
+                         if email.message_from_bytes(self.folder.messages[u].raw).get("Message-ID") == header.group(1)]
             since = re.search(r"SINCE (\d{2}-\w{3}-\d{4})", rest)
             if since:
                 start = datetime.datetime.strptime(since.group(1), "%d-%b-%Y").date()

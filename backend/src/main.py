@@ -5,7 +5,7 @@ from dataclasses import asdict
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 
 load_dotenv()
@@ -1024,6 +1024,278 @@ def decide_row_receipt(row_id: str, req: ReceiptDecision, db: Session = Depends(
     db.commit()
     db.refresh(row)
     return _row_view(row)
+
+
+# ---------------------------------------------------------------------------
+# Receipts page: review, corrections and manual links (receipts never change bank values)
+# ---------------------------------------------------------------------------
+
+def _receipt(db: Session, receipt_id: str):
+    from src.models import Receipt
+    receipt = db.get(Receipt, receipt_id)
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="Receipt not found.")
+    return receipt
+
+
+def _plan_directory(db: Session, plan_id: Optional[str]) -> CategoryDirectory:
+    """Categories of the given plan, else of the only (first) plan; receipts are not tied to a plan."""
+    plan = db.get(Plan, plan_id) if plan_id else db.query(Plan).order_by(Plan.id).first()
+    return CategoryDirectory(db, plan.id if plan else "")
+
+
+def _receipt_detail(db: Session, receipt, plan_id: Optional[str]) -> dict:
+    from src.receipts.browse import detail
+    return detail(db, receipt, _plan_directory(db, plan_id))
+
+
+@app.get("/receipts")
+def list_receipts(
+    status: Optional[str] = None, kind: Optional[str] = None, linked: Optional[bool] = None,
+    mailbox: Optional[str] = None, q: Optional[str] = None,
+    date_from: Optional[str] = Query(None, alias="from"), date_to: Optional[str] = Query(None, alias="to"),
+    page: int = 1, page_size: int = 50,
+    db: Session = Depends(get_db), _user: str = Depends(verify_token),
+):
+    """Stored receipts and skipped messages, filtered and paginated, newest first."""
+    from src.receipts.browse import list_receipts as browse
+    return browse(db, status=status, kind=kind, linked=linked, mailbox=mailbox, q=q,
+                  date_from=date_from, date_to=date_to, page=page, page_size=page_size)
+
+
+@app.get("/receipts/{receipt_id}")
+def get_receipt(receipt_id: str, plan_id: Optional[str] = None,
+                db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """One receipt with its items, evidence, corrected fields, extracted values and linked rows."""
+    return _receipt_detail(db, _receipt(db, receipt_id), plan_id)
+
+
+class ReceiptCorrection(BaseModel):
+    fields: dict = {}             # merchant, purchase_date, total_milliunits, currency, kind, reference, items
+    reset: List[str] = []         # fields returned to their extracted value
+    excluded: Optional[bool] = None
+
+MATCHING_FIELDS = {"merchant", "purchase_date", "total_milliunits", "currency", "kind"}
+
+@app.patch("/receipts/{receipt_id}")
+def correct_receipt(receipt_id: str, req: ReceiptCorrection, plan_id: Optional[str] = None,
+                    db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Store the user's corrections (kept over any later extraction), then match the receipt again."""
+    from src.receipts.matching import rematch_receipt
+    from src.receipts.review import CorrectionError, correct, reset
+    receipt = _receipt(db, receipt_id)
+    try:
+        changed = correct(receipt, req.fields)
+        reset(receipt, req.reset)
+    except CorrectionError as error:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if req.excluded is not None:
+        receipt.excluded = req.excluded
+    db.flush()
+    if MATCHING_FIELDS & (set(changed) | set(req.reset)):
+        rematch_receipt(db, receipt)
+    db.commit()
+    db.refresh(receipt)
+    return _receipt_detail(db, receipt, plan_id)
+
+
+@app.get("/receipts/{receipt_id}/candidates")
+def receipt_candidates(receipt_id: str, plan_id: Optional[str] = None,
+                       db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Rows from any import, including rows already in YNAB, scored against this receipt."""
+    from src.receipts.browse import candidates
+    return {"candidates": candidates(db, _receipt(db, receipt_id), _plan_directory(db, plan_id))}
+
+
+class ReceiptLink(BaseModel):
+    row_id: str
+    action: str  # link | unlink | reject
+
+@app.post("/receipts/{receipt_id}/links")
+def link_receipt(receipt_id: str, req: ReceiptLink, plan_id: Optional[str] = None,
+                 db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Link a receipt to a row of any import as evidence; the row and YNAB are never changed."""
+    receipt = _receipt(db, receipt_id)
+    if receipt.status == "not_receipt":
+        raise HTTPException(status_code=409, detail="This message is marked as not a receipt.")
+    row = _owned_row(db, req.row_id)
+    try:
+        decide_receipt(db, row, receipt, req.action)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    db.commit()
+    db.refresh(receipt)
+    return _receipt_detail(db, receipt, plan_id)
+
+
+class ReceiptClassification(BaseModel):
+    as_: str = Field(alias="as")  # receipt | not_receipt
+
+@app.post("/receipts/{receipt_id}/classify")
+def classify_receipt(receipt_id: str, req: ReceiptClassification, plan_id: Optional[str] = None,
+                     db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Mark a message as a receipt (re-read read-only from the mailbox) or as not a receipt; fetches keep it."""
+    from src.mail.fetch import rescue
+    from src.receipts.matching import rematch_receipt
+    from src.receipts.review import classify
+    receipt = _receipt(db, receipt_id)
+    note = ""
+    if req.as_ == "not_receipt":
+        classify(receipt, "not_receipt")
+    elif req.as_ == "receipt":
+        if receipt.status == "not_receipt" or receipt.error:
+            s = settings.load_settings()
+            note = rescue(db, s, receipt, ai=_ai_client(db, s))
+        else:
+            classify(receipt, receipt.status)
+    else:
+        raise HTTPException(status_code=422, detail="Use 'receipt' or 'not_receipt'.")
+    db.flush()
+    rematch_receipt(db, receipt)
+    db.commit()
+    db.refresh(receipt)
+    return {**_receipt_detail(db, receipt, plan_id), "note": note}
+
+
+class AIRequestOptions(BaseModel):
+    estimate_only: bool = False
+
+def _ai_estimate(db: Session, purpose: str, requests: int) -> dict:
+    from src.ai.client import average_request_cost, month_to_date_cost
+    s = settings.load_settings()
+    spent = month_to_date_cost(db)
+    return {"requests": requests, "estimate_usd": round(requests * average_request_cost(db, purpose), 4),
+            "spent_usd": round(spent, 4), "budget_usd": s.ai_monthly_budget_usd,
+            "remaining_usd": round(max(0.0, s.ai_monthly_budget_usd - spent), 4)}
+
+@app.post("/receipts/{receipt_id}/reread")
+def reread_receipt(receipt_id: str, req: AIRequestOptions, plan_id: Optional[str] = None,
+                   db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """Read one receipt again with AI (estimate first with estimate_only); failures leave it unchanged."""
+    from src.ai.client import AIError, BudgetExceeded
+    from src.mail.fetch import reread
+    from src.mail.imap_source import MailError
+    from src.receipts.matching import rematch_receipt
+    receipt = _receipt(db, receipt_id)
+    if req.estimate_only:
+        return _ai_estimate(db, "extract", 1)
+    s = settings.load_settings()
+    ai = _ai_client(db, s)
+    if ai is None:
+        raise HTTPException(status_code=409, detail=settings.ai_feature(s)["reason"])
+    try:
+        reread(db, s, receipt, ai)
+    except BudgetExceeded as error:
+        db.commit()
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except AIError as error:
+        db.commit()                                    # usage is recorded; the receipt itself is unchanged
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    except MailError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    db.flush()
+    rematch_receipt(db, receipt)
+    db.commit()
+    db.refresh(receipt)
+    return _receipt_detail(db, receipt, plan_id)
+
+
+@app.get("/spending")
+def spending_report(
+    plan_id: Optional[str] = None, group: str = "category", q: Optional[str] = None,
+    date_from: Optional[str] = Query(None, alias="from"), date_to: Optional[str] = Query(None, alias="to"),
+    db: Session = Depends(get_db), _user: str = Depends(verify_token),
+):
+    """Spending from receipt items by category, merchant or item, per month; local only, no AI call."""
+    from src.receipts.spending import report
+    plan = db.get(Plan, plan_id) if plan_id else db.query(Plan).order_by(Plan.id).first()
+    if plan is None:
+        raise HTTPException(status_code=404, detail="Plan not found.")
+    try:
+        return report(db, plan.id, date_from=date_from, date_to=date_to, group=group, q=q)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+class CategorizeItemsRequest(BaseModel):
+    receipt_ids: List[str]
+    plan_id: Optional[str] = None
+    estimate_only: bool = False
+
+@app.post("/receipts/categorize-items")
+def categorize_receipt_items(req: CategorizeItemsRequest, db: Session = Depends(get_db),
+                             _user: str = Depends(verify_token)):
+    """AI categories for uncategorized items of these receipts (one request per receipt, estimate first)."""
+    from concurrent.futures import ThreadPoolExecutor
+    from src.ai import categorize_items as ci
+    from src.ai.categorize import CategorizationContext
+    from src.ai.client import AIError, BudgetExceeded
+    from src.models import Receipt
+    from src.receipts.items import resolve
+    from src.receipts.spending import counted
+    directory = _plan_directory(db, req.plan_id)
+    receipts = [r for r in db.query(Receipt).filter(Receipt.id.in_(req.receipt_ids)).all() if counted(r)]
+    prepared = [(r, p) for r in receipts if (p := ci.prepare(r, resolve(r, directory)))]
+    if req.estimate_only:
+        return _ai_estimate(db, "categorize_items", len(prepared))
+    s = settings.load_settings()
+    ai = _ai_client(db, s)
+    if ai is None:
+        raise HTTPException(status_code=409, detail=settings.ai_feature(s)["reason"])
+    plan = db.get(Plan, req.plan_id) if req.plan_id else db.query(Plan).order_by(Plan.id).first()
+    ctx = CategorizationContext(db, plan.id)
+
+    def work(item_request):
+        try:
+            return ci.request(ai, ctx, item_request), None
+        except AIError as error:
+            return None, error
+
+    with ThreadPoolExecutor(max_workers=max(1, s.ai_max_concurrency)) as pool:
+        outcomes = list(pool.map(work, [p for _, p in prepared]))
+    counts = {"receipts": len(prepared), "items_filled": 0, "failed": 0, "budget_reached": False, "errors": []}
+    for (receipt, _), (answers, error) in zip(prepared, outcomes):
+        if error is not None:
+            counts["failed"] += 1
+            counts["budget_reached"] = counts["budget_reached"] or isinstance(error, BudgetExceeded)
+            if str(error) not in counts["errors"]:
+                counts["errors"].append(str(error))
+            continue
+        counts["items_filled"] += ci.store(receipt, answers)
+    ai.flush_usage(db)
+    db.commit()
+    return counts
+
+
+class ItemCategory(BaseModel):
+    category_id: Optional[str] = None   # null clears the user's choice
+
+@app.put("/receipts/{receipt_id}/items/{index}/category")
+def set_item_category(receipt_id: str, index: int, req: ItemCategory, plan_id: Optional[str] = None,
+                      db: Session = Depends(get_db), _user: str = Depends(verify_token)):
+    """The user's category for one receipt item; it wins over splits, the row, and any later AI request."""
+    from src.receipts.review import items as receipt_items, own_items
+    receipt = _receipt(db, receipt_id)
+    items = receipt_items(receipt)
+    if not 0 <= index < len(items):
+        raise HTTPException(status_code=404, detail="Item not found.")
+    directory = _plan_directory(db, plan_id)
+    item = items[index]
+    if req.category_id is None:
+        if item.get("category_source") == "user":
+            item.pop("category_id", None)
+            item.pop("category_source", None)
+    else:
+        if req.category_id not in directory or directory.is_deleted(req.category_id):
+            raise HTTPException(status_code=422, detail="This category is not in the budget.")
+        item.update(category_id=req.category_id, category_source="user")
+        item.pop("category_note", None)
+    receipt.items_json = json.dumps(items, ensure_ascii=False)
+    own_items(receipt)                       # a re-read can no longer renumber or drop this item
+    db.commit()
+    db.refresh(receipt)
+    return _receipt_detail(db, receipt, plan_id)
 
 
 class TransferRouting(BaseModel):

@@ -146,6 +146,149 @@ unpushed rows of the active import (transfers and repayments excluded, within
 `POST /import-rows/{row_id}/receipts` with `{"receipt_id": "…", "action": "link" | "unlink" | "reject"}`
 returns the row; rows carry their receipt evidence in `receipts`.
 
+## Reviewing and correcting receipts
+
+The **Receipts** page (receipt icon in the header) lists every stored receipt
+and every message the fetch skipped as *not a receipt*, newest first.
+
+**Filters:**
+- status (*read*, *needs a check*, *waiting for AI*, *not a receipt*)
+- kind (purchase, refund, shipping, payment)
+- linked or unlinked
+- mailbox
+- date range
+- a search over merchant, subject, sender and reference
+
+Receipts with the same merchant, total and currency within 3 days are marked
+as *possible duplicates* (for example an order confirmation and its invoice).
+Nothing is excluded automatically.
+
+**The detail of a receipt shows:**
+- the fields and items in use, and the values originally extracted
+- for *needs a check*, the AI total next to the total read from the email or PDF
+- the subject, sender, the mailbox label and folder of each copy, the stored
+  text excerpt, how it was read, and any error
+- the rows it is linked to or proposed for, with their match signals
+
+**Corrections:**
+- **Fields:** merchant, date (`YYYY-MM-DD`), total and item amounts (positive,
+  in the receipt currency), currency (three letters), kind, reference and items
+  can be edited.
+- **Your values win:** a corrected field is marked as yours. No later fetch,
+  copy of the same message or AI re-read changes it; fields you did not
+  correct are still updated. *Reset* returns a field to its extracted value.
+- **Re-matching:** after a change to merchant, date, total, currency or kind,
+  the receipt is matched again against the active import. Pairings you linked
+  or rejected stay as you decided.
+- **Exclude from spending** keeps the receipt and its links but leaves it out
+  of spending (for a duplicate confirmation, for example).
+
+**Receipt or not:**
+- *Not a receipt* is kept across fetches.
+- *This is a receipt* on a skipped message reads that message again from
+  Bridge, read-only (`EXAMINE` and `UID FETCH … BODY.PEEK[]`), because only
+  its subject and sender were stored. If Bridge renumbered the folder, the
+  message is found again by its Message-ID (`UID SEARCH HEADER Message-ID`).
+  The local receipt check is skipped, and the message is read like a fetched
+  receipt (with AI when it is on).
+- If Bridge is not running, the decision is kept, the receipt waits with the
+  reason shown, and the button can be used again later.
+
+**Read again with AI** re-reads one receipt from the mailbox (PDFs
+included), or from its stored excerpt when Bridge cannot provide it.
+- The estimated cost is shown first, and the request counts against
+  `AI_MONTHLY_BUDGET_USD`.
+- A refused or failed request, or a reached budget, leaves the receipt as it
+  was and shows the reason.
+- Your corrected fields are kept, as above.
+
+**Links to rows already in YNAB:** from a receipt, *Find rows* lists rows of
+any import within ±30 days, including rows already pushed, scored like
+automatic matching. Linking a pushed row only records evidence for review and
+spending: the row, its YNAB transaction and its reconciliation state do not
+change. Automatic links are still made only to rows not yet pushed.
+
+### API
+
+| Method | Path | Body / result |
+|---|---|---|
+| `GET` | `/receipts` | `status`, `kind`, `linked`, `mailbox`, `q`, `from`, `to`, `page`, `page_size` → `{total, page, page_size, receipts}` |
+| `GET` | `/receipts/{id}` | Detail: fields, `user_fields`, `extracted`, `items` (with category and source), `sources`, `text_excerpt`, `matches` |
+| `PATCH` | `/receipts/{id}` | `{"fields": {...}, "reset": ["merchant"], "excluded": true}` → detail; `422` with the reason when a value is invalid (nothing is changed) |
+| `POST` | `/receipts/{id}/classify` | `{"as": "receipt" \| "not_receipt"}` → detail plus `note` (why a rescue is waiting) |
+| `POST` | `/receipts/{id}/reread` | `{"estimate_only": true}` → `{requests, estimate_usd, spent_usd, budget_usd, remaining_usd}`; otherwise the detail, `409` (budget or AI off), `502` (AI failed), `503` (message unavailable) |
+| `GET` | `/receipts/{id}/candidates` | Rows from any import, scored, with `in_ynab` |
+| `POST` | `/receipts/{id}/links` | `{"row_id": "…", "action": "link" \| "unlink" \| "reject"}` → detail |
+
+Detail and list responses name mailboxes by their label (`me`, `partner`),
+never by username, and never contain passwords or the API key.
+
+## Spending analysis
+
+The **Spending** tab of the Receipts page shows what purchases contained,
+from receipt items, for a date range.
+- **Grouping:** by category, merchant or item, with a total per month.
+- **Search:** finds items and merchants by name, across all merchants.
+- **Drill-down:** every figure opens the items and receipts behind it.
+- Nothing is sent anywhere to build a report: it is computed from the local
+  database.
+
+### Item categories
+
+Each item takes the first category available:
+
+1. **your choice** (pick it on the item; nothing later changes it)
+2. **split line**: the linked row's split line for that item (same
+   description, or one line per item in the same order and amounts)
+3. **row**: the linked row's single category (the category it was pushed
+   with, else the edited or suggested one)
+4. **AI**: only after *Categorize items*
+5. otherwise *Uncategorized*
+
+The source is shown next to every item. If a category was deleted in YNAB,
+the item is shown as uncategorized with a note naming it.
+
+**Categorize items** asks Claude for the uncategorized items of the receipts
+in view:
+- **Before:** the number of requests and their estimated cost are shown first.
+- **Requests:** one per receipt, containing the merchant, date, the
+  uncategorized items and the linked bank text. The subject, sender and email
+  text are not sent.
+- **Checks:** answers are checked against the budget's live categories; an
+  unknown category leaves the item uncategorized with the reason. Items with
+  your, a split or a row category are never sent or changed.
+- **Cost:** requests are recorded as `categorize_items` and count against
+  `AI_MONTHLY_BUDGET_USD`.
+
+### What is counted
+
+- **Counted:** purchase receipts. Refunds are subtracted.
+- **Not counted:** shipping and payment notices, messages marked *not a
+  receipt*, and receipts excluded from spending.
+- **Currency:** amounts are in the budget currency.
+  - A receipt linked to bank rows is counted at the bank amount: its items
+    are scaled so they add up exactly to it, which also converts foreign
+    receipts.
+  - An unlinked receipt in the budget currency is counted at its own total.
+  - An unlinked receipt in another currency is listed under *not counted*
+    with the reason; there is no exchange-rate conversion.
+- **Fees and discounts:** when the items do not add up to the receipt total,
+  the difference appears as *Other (fees, discounts)*. Items read without
+  prices share the amount equally and keep their categories. A receipt
+  without items counts as one line named after the merchant.
+- **Rounding:** all amounts are integer milliunits; scaled lines always sum
+  to the counted amount.
+- **The report also shows** the share of spending that is uncategorized and
+  the receipts that could not be counted.
+
+### API
+
+| Method | Path | Body / result |
+|---|---|---|
+| `GET` | `/spending` | `plan_id`, `from`, `to`, `group` (`category` \| `merchant` \| `item`), `q` → `{currency, months, total_milliunits, uncategorized_milliunits, uncategorized_share, receipts_counted, uncounted, uncategorized_receipt_ids, groups}`; each group has `label`, `total_milliunits`, `months` and its `lines` |
+| `PUT` | `/receipts/{id}/items/{index}/category` | `{"category_id": "c2"}`, or `null` to clear your choice → receipt detail |
+| `POST` | `/receipts/categorize-items` | `{"receipt_ids": [...], "plan_id": "…", "estimate_only": true}` → estimate; without `estimate_only` → `{receipts, items_filled, failed, budget_reached, errors}` |
+
 ## AI suggestions (Claude)
 
 AI is **off** until `ANTHROPIC_API_KEY` is set in `backend/.env`:

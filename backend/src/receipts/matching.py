@@ -194,6 +194,14 @@ def match_active_batches(db: Session) -> dict:
     return match_batches(db, db.query(ImportBatch).filter(ImportBatch.status == "active").all())
 
 
+def rematch_receipt(db: Session, receipt: Receipt) -> dict:
+    """After a receipt correction: recompute matching for the active rows near its date (user decisions kept)."""
+    when = receipt.purchase_date or receipt.message_date
+    rows = [r for b in db.query(ImportBatch).filter(ImportBatch.status == "active").all() for r in matchable_rows(b)
+            if when and abs(_days(r.date, when) or 999) <= WINDOW_DAYS]
+    return run_matching(db, rows)
+
+
 # ---------------------------------------------------------------------------
 # User decisions and split suggestions
 # ---------------------------------------------------------------------------

@@ -543,3 +543,146 @@ export const aiSuggestBatch = (batchId: string, rowIds?: string[]) =>
 
 /* ---- Health ---- */
 export const healthCheck = () => request<{ status: string }>('/health');
+
+/* ---- Receipts page: review, corrections and spending ---- */
+export type ReceiptKind = 'purchase' | 'refund' | 'shipping' | 'payment';
+export interface ReceiptItem {
+  index: number;
+  description: string;
+  quantity: number;
+  amount_milliunits: number;
+  category_id: string | null;
+  category_name: string | null;
+  category_source: 'user' | 'split' | 'row' | 'ai' | 'uncategorized';
+  note?: string;
+  category_note?: string;
+}
+export interface ReceiptSummary {
+  id: string;
+  status: string;
+  kind: ReceiptKind;
+  merchant: string;
+  date: string | null;
+  purchase_date: string | null;
+  total_milliunits: number | null;
+  currency: string;
+  subject: string;
+  mailboxes: string[];
+  linked_rows: number;
+  excluded: boolean;
+  user_fields: string[];
+  error: string;
+  possible_duplicates: string[];
+}
+export interface ReceiptRowSummary {
+  id: string;
+  date: string;
+  amount_milliunits: number | null;
+  currency: string;
+  bank_text: string;
+  write_state: string;
+  in_ynab: boolean;
+  batch: string | null;
+  category: string | null;
+  split: boolean;
+}
+export interface ReceiptMatchView {
+  state: 'proposed' | 'linked' | 'rejected' | null;
+  origin?: string;
+  role?: string;
+  score: number;
+  signals: Record<string, number>;
+  row: ReceiptRowSummary;
+}
+export interface ReceiptDetail extends ReceiptSummary {
+  reference: string;
+  card_hint: string;
+  sender: string;
+  message_date: string | null;
+  extraction_method: string;
+  local_total_milliunits: number | null;
+  extracted: Record<string, unknown>;
+  items: ReceiptItem[];
+  sources: { mailbox: string; folder: string }[];
+  text_excerpt: string;
+  matches: ReceiptMatchView[];
+  note?: string;
+}
+export interface ReceiptPage { total: number; page: number; page_size: number; receipts: ReceiptSummary[] }
+export interface ReceiptFilters {
+  status?: string; kind?: string; linked?: string; mailbox?: string; q?: string; from?: string; to?: string;
+  page?: number; page_size?: number;
+}
+export interface AIEstimate { requests: number; estimate_usd: number; spent_usd: number; budget_usd: number; remaining_usd: number }
+export interface ItemCorrection { description: string; quantity: number; amount_milliunits: number; category_id?: string | null; category_source?: string }
+
+function query(params: Record<string, string | number | undefined | null>): string {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== null && v !== '') q.set(k, String(v));
+  const s = q.toString();
+  return s ? `?${s}` : '';
+}
+
+export const listReceipts = (filters: ReceiptFilters) =>
+  request<ReceiptPage>(`/receipts${query({ ...filters })}`);
+export const fetchReceipt = (id: string, planId?: string) =>
+  request<ReceiptDetail>(`/receipts/${id}${query({ plan_id: planId })}`);
+export const correctReceipt = (id: string, body: { fields?: Record<string, unknown>; reset?: string[]; excluded?: boolean }, planId?: string) =>
+  request<ReceiptDetail>(`/receipts/${id}${query({ plan_id: planId })}`, { method: 'PATCH', body: JSON.stringify(body) });
+export const classifyReceipt = (id: string, as: 'receipt' | 'not_receipt', planId?: string) =>
+  request<ReceiptDetail>(`/receipts/${id}/classify${query({ plan_id: planId })}`, {
+    method: 'POST', body: JSON.stringify({ as }), signal: AbortSignal.timeout(5 * 60_000),
+  });
+export const estimateReread = (id: string) =>
+  request<AIEstimate>(`/receipts/${id}/reread`, { method: 'POST', body: JSON.stringify({ estimate_only: true }) });
+export const rereadReceipt = (id: string, planId?: string) =>
+  request<ReceiptDetail>(`/receipts/${id}/reread${query({ plan_id: planId })}`, {
+    method: 'POST', body: JSON.stringify({}), signal: AbortSignal.timeout(5 * 60_000),
+  });
+export const receiptCandidates = (id: string, planId?: string) =>
+  request<{ candidates: ReceiptMatchView[] }>(`/receipts/${id}/candidates${query({ plan_id: planId })}`);
+export const linkReceiptRow = (id: string, rowId: string, action: 'link' | 'unlink' | 'reject', planId?: string) =>
+  request<ReceiptDetail>(`/receipts/${id}/links${query({ plan_id: planId })}`, {
+    method: 'POST', body: JSON.stringify({ row_id: rowId, action }),
+  });
+export const setItemCategory = (id: string, index: number, categoryId: string | null, planId?: string) =>
+  request<ReceiptDetail>(`/receipts/${id}/items/${index}/category${query({ plan_id: planId })}`, {
+    method: 'PUT', body: JSON.stringify({ category_id: categoryId }),
+  });
+
+export interface SpendingLine {
+  receipt_id: string;
+  merchant: string;
+  date: string | null;
+  description: string;
+  amount_milliunits: number;
+  item_index: number | null;
+  category_id: string | null;
+  category_name: string | null;
+  category_source: string;
+}
+export interface SpendingGroup { key: string; label: string; total_milliunits: number; months: Record<string, number>; lines: SpendingLine[] }
+export interface SpendingReport {
+  currency: string;
+  group: 'category' | 'merchant' | 'item';
+  months: string[];
+  total_milliunits: number;
+  uncategorized_milliunits: number;
+  uncategorized_share: number;
+  receipts_counted: number;
+  uncounted: { receipt_id: string; merchant: string; date: string | null; total_milliunits: number | null; currency: string; reason: string }[];
+  uncategorized_receipt_ids: string[];
+  groups: SpendingGroup[];
+}
+export const fetchSpending = (params: { plan_id?: string; from?: string; to?: string; group: string; q?: string }) =>
+  request<SpendingReport>(`/spending${query(params)}`);
+export interface CategorizeItemsResult { receipts: number; items_filled: number; failed: number; budget_reached: boolean; errors: string[] }
+export const estimateCategorizeItems = (receiptIds: string[], planId?: string) =>
+  request<AIEstimate>('/receipts/categorize-items', {
+    method: 'POST', body: JSON.stringify({ receipt_ids: receiptIds, plan_id: planId ?? null, estimate_only: true }),
+  });
+export const categorizeItems = (receiptIds: string[], planId?: string) =>
+  request<CategorizeItemsResult>('/receipts/categorize-items', {
+    method: 'POST', body: JSON.stringify({ receipt_ids: receiptIds, plan_id: planId ?? null }),
+    signal: AbortSignal.timeout(15 * 60_000),
+  });
