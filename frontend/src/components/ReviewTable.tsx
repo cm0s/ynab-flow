@@ -25,19 +25,6 @@ export interface ReviewedRow extends Omit<ImportRowData, "status"> {
   flagColor: FlagColor;
 }
 
-export function toReviewedRows(predictions: ImportRowData[]): ReviewedRow[] {
-  return predictions.map((p) => ({
-    ...p,
-    id: p.id,
-    status: (p.status as ReviewStatus) || (p.review_required ? 'pending' : 'accepted'),
-    editedPayee: p.edited_payee ?? p.payee ?? '',
-    editedCategory: p.edited_category ?? p.category ?? '',
-    editedCategoryId: p.edited_category_id ?? p.category_id ?? null,
-    editedMemo: p.edited_memo || '',
-    flagColor: (p.flag_color || '') as FlagColor,
-  }));
-}
-
 /** "Use receipt split" from the linked receipt's items that fit this row. */
 function receiptSplitSuggestions(row: ImportRowData): SplitSuggestion[] {
   const linked = (row.receipts ?? []).find((r) => r.state === 'linked' && r.role === 'primary');
@@ -283,7 +270,8 @@ export default function ReviewTable({ rows, categoryGroups, payees, onUpdateRow,
   const toggleSelect = (idx: number) => {
     setSelected((prev) => {
       const next = new Set(prev);
-      next.has(idx) ? next.delete(idx) : next.add(idx);
+      if (next.has(idx)) next.delete(idx);
+      else next.add(idx);
       return next;
     });
   };
