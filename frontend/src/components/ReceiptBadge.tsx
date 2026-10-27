@@ -1,6 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Receipt, Link2, Unlink, X } from 'lucide-react';
+import { Receipt, Link2, Unlink, X, ExternalLink } from 'lucide-react';
 import type { ImportRowData, ReceiptView } from '../api/client';
 import { decideReceipt } from '../api/client';
 import { formatMilliunits } from '../lib/splits';
@@ -17,10 +17,11 @@ const KIND_LABELS: Record<string, string> = {
 interface Props {
   row: ImportRowData;
   onRowReplaced: (row: ImportRowData) => void;
+  onOpenReceipt?: (receiptId: string) => void;
 }
 
 /** Receipt evidence for a row: a badge, and a popover with details and Link / Unlink / Reject. */
-export default function ReceiptBadge({ row, onRowReplaced }: Props) {
+export default function ReceiptBadge({ row, onRowReplaced, onOpenReceipt }: Props) {
   const receipts = row.receipts ?? [];
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState({ top: 0, left: 0 });
@@ -116,6 +117,12 @@ export default function ReceiptBadge({ row, onRowReplaced }: Props) {
                     disabled={busy} onClick={() => act(r, 'reject')}>
                     <X size={12} /> Not this purchase
                   </button>
+                  {onOpenReceipt && (
+                    <button className="btn btn-ghost" style={{ fontSize: '0.78rem', padding: '3px 10px' }}
+                      onClick={() => { setOpen(false); onOpenReceipt(r.receipt_id); }} title="Open on the Receipts page">
+                      <ExternalLink size={12} /> Details
+                    </button>
+                  )}
                 </div>
               </div>
             ))}

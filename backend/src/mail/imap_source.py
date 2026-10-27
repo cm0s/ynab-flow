@@ -36,6 +36,7 @@ class MailConnection(Protocol):
     def examine(self, folder: str) -> int: ...          # returns UIDVALIDITY
     def uids_after(self, last_uid: int, since: Optional[date] = None) -> List[int]: ...
     def fetch(self, uid: int) -> bytes: ...
+    def find_message_id(self, message_id: str) -> Optional[int]: ...
     def logout(self) -> None: ...
 
 
@@ -121,6 +122,16 @@ class ImapConnection:
             raise MailError("Bridge could not list messages.")
         uids = [int(u) for u in (data[0] or b"").split()]
         return sorted(u for u in uids if u > last_uid)     # "n:*" also returns the highest UID when n is beyond it
+
+    def find_message_id(self, message_id: str) -> Optional[int]:
+        """The UID of the message with this Message-ID in the open folder (after a UIDVALIDITY change)."""
+        if not message_id or any(c in message_id for c in '"\\\r\n'):
+            return None
+        status, data = self._imap.uid("SEARCH", None, f'HEADER Message-ID "{message_id}"')
+        if status != "OK":
+            raise MailError("Bridge could not search the folder.")
+        uids = [int(u) for u in (data[0] or b"").split()]
+        return max(uids) if uids else None
 
     def fetch(self, uid: int) -> bytes:
         status, data = self._imap.uid("FETCH", str(int(uid)), FETCH_ITEMS)

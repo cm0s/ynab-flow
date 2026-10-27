@@ -345,6 +345,10 @@ class Receipt(Base):
     message_date = Column(String, nullable=True)
     text_excerpt = Column(Text, nullable=False, default="")       # bounded, local only
     error = Column(String, nullable=False, default="")
+    # Review: the last extracted values, the fields the user corrected (never overwritten), spending exclusion
+    extracted_json = Column(Text, nullable=False, default="{}", server_default="{}")
+    user_fields_json = Column(Text, nullable=False, default="[]", server_default="[]")
+    excluded = Column(Boolean, nullable=False, default=False, server_default=sa_false())
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
